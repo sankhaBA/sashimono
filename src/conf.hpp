@@ -115,6 +115,7 @@ namespace conf
         std::string config_file; // Full path to the config file.
         std::string log_dir;     // Log directory full path.
         std::string data_dir;    // Data directory full path.
+        std::string dns_evernode_sh;
     };
 
     // Global context struct exposed to the application.

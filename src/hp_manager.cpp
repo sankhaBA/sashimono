@@ -165,7 +165,7 @@ namespace hp
         //     return -1;
         // }
 
-        const std::string image_name = image;
+        std::string image_name = image;
 
         ports instance_ports;
         if (!vacant_ports.empty())
@@ -198,7 +198,7 @@ namespace hp
 
         auto pos = image_name.find("--");
         if (pos != std::string::npos) {
-        image_name = image_name.substr(0, pos);
+            image_name = image_name.substr(0, pos);
         }
 
         if (create_contract(username, owner_pubkey, contract_id, contract_dir, instance_ports, info) == -1 ||
