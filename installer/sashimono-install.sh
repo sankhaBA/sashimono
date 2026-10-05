@@ -220,10 +220,11 @@ function setup_certbot() {
         local lenc_acc_email=$(call_third_party "certbot show_account" "get current certbot account" 2>/dev/null | grep "Email contact:" | cut -d ':' -f2 | sed 's/ *//g')
 
         # If there's an existing registration with a different email and it has certificates, complain and return.
+        # Registrations without an email show "none", those can be updated safely.
         if [[ ! -z $lenc_acc_email ]] && [[ $lenc_acc_email != $email_address ]]; then
             # If there are certificates complain and return. Otherwise update email.
             local count=$(call_third_party "certbot certificates" "check letsencrypt certificates" 2>/dev/null | grep -c "Certificate Name")
-            [ $count -gt 0 ] &&
+            [ $count -gt 0 ] && [[ $lenc_acc_email != "none" ]] &&
                 echo "There's an existing letsencrypt registration with $lenc_acc_email, Please use the same email or update the letsencrypt email with certbot." &&
                 return 1
 
