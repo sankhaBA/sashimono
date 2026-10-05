@@ -27,7 +27,7 @@
     reputationd_script_dir=$(dirname "$(realpath "$0")")
     root_user="root"
 
-    repo_owner="EvernodeXRPL"
+    repo_owner="sankhaBA"
     repo_name="evernode-resources"
     desired_branch="main"
 
