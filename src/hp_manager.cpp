@@ -1135,8 +1135,14 @@ namespace hp
             return false;
         }
 
+        // cgroupfs files report st_size as 0, So we read until EOF instead of using util::read_from_fd.
         std::string buf;
-        if (util::read_from_fd(fd, buf, 0) == -1)
+        char chunk[256];
+        ssize_t res;
+        while ((res = read(fd, chunk, sizeof(chunk))) > 0)
+            buf.append(chunk, res);
+
+        if (res == -1)
         {
             LOG_ERROR << errno << ": Error reading the cgroup controllers file.";
             close(fd);
