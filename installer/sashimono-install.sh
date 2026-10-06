@@ -175,6 +175,11 @@ function call_third_party() {
     return 1
 }
 
+function is_cgroup_v2() {
+    # cgroup v2 (unified hierarchy) is mounted as cgroup2fs. Hybrid setups are treated as cgroup v1.
+    [ "$(stat -fc %T /sys/fs/cgroup/)" == "cgroup2fs" ]
+}
+
 function cgrulesengd_servicename() {
     # Find the cgroups rules engine service.
     local cgrulesengd_filepath=$(grep "ExecStart.*=.*/cgrulesengd$" /etc/systemd/system/*.service | head -1 | awk -F : ' { print $1 } ')
@@ -224,7 +229,7 @@ function setup_certbot() {
         if [[ ! -z $lenc_acc_email ]] && [[ $lenc_acc_email != $email_address ]]; then
             # If there are certificates complain and return. Otherwise update email.
             local count=$(call_third_party "certbot certificates" "check letsencrypt certificates" 2>/dev/null | grep -c "Certificate Name")
-            [ $count -gt 0 ] && [[ $lenc_acc_email != "none" ]] &&
+            [ $count -gt 0 ] &&
                 echo "There's an existing letsencrypt registration with $lenc_acc_email, Please use the same email or update the letsencrypt email with certbot." &&
                 return 1
 
@@ -454,8 +459,8 @@ function upgrade() {
     return 0
 }
 
-# Check cgroup rule config exists.
-[ ! -f /etc/cgred.conf ] && echo "cgroups is not configured. Make sure you've installed and configured cgroup-tools." && exit 1
+# Check cgroup rule config exists (Only required with cgroup v1).
+! is_cgroup_v2 && [ ! -f /etc/cgred.conf ] && echo "cgroups is not configured. Make sure you've installed and configured cgroup-tools." && exit 1
 
 # Stop services before start upgrade.
 if [[ "$UPGRADE" == "1" ]]; then
@@ -579,22 +584,28 @@ fi
 
 stage "Configuring Sashimono services"
 
-cgrulesengd_service=$(cgrulesengd_servicename)
-[ -z "$cgrulesengd_service" ] && echo "cgroups rules engine service does not exist." && abort
-
-# Setting up cgroup rules with sashiusers group (if not already setup).
-echo "Creating cgroup rules..."
 ! grep -q $SASHIUSER_GROUP /etc/group && ! groupadd $SASHIUSER_GROUP && echo "$SASHIUSER_GROUP group creation failed." && abort
-if ! grep -q $SASHIUSER_GROUP /etc/cgrules.conf; then
-    ! echo "@$SASHIUSER_GROUP       cpu,memory              %u$CG_SUFFIX" >>/etc/cgrules.conf && echo "Cgroup rule creation failed." && abort
-    # Restart the service to apply the cgrules config.
-    echo "Restarting the '$cgrulesengd_service' service."
-    systemctl restart $cgrulesengd_service || abort
+
+if is_cgroup_v2; then
+    # With cgroup v2, resources are limited using systemd user slices which are configured per user.
+    echo "cgroup v2 detected. Using systemd user slices for resource limits."
+else
+    cgrulesengd_service=$(cgrulesengd_servicename)
+    [ -z "$cgrulesengd_service" ] && echo "cgroups rules engine service does not exist." && abort
+
+    # Setting up cgroup rules with sashiusers group (if not already setup).
+    echo "Creating cgroup rules..."
+    if ! grep -q $SASHIUSER_GROUP /etc/cgrules.conf; then
+        ! echo "@$SASHIUSER_GROUP       cpu,memory              %u$CG_SUFFIX" >>/etc/cgrules.conf && echo "Cgroup rule creation failed." && abort
+        # Restart the service to apply the cgrules config.
+        echo "Restarting the '$cgrulesengd_service' service."
+        systemctl restart $cgrulesengd_service || abort
+    fi
 fi
 
 # Install Sashimono Agent cgcreate service.
-# This is a oneshot service which runs once at system startup. The intention is to run 'cgcreate' for
-# all sashimono users every time the system boots up.
+# This is a oneshot service which runs once at system startup. The intention is to apply resource limits for
+# all sashimono users every time the system boots up ('cgcreate' with cgroup v1, systemd user slices with cgroup v2).
 echo "[Unit]
 Description=Sashimono cgroup creation service.
 After=network.target

@@ -100,10 +100,13 @@ popd > /dev/null 2>&1
 sudo rm -r $workdir
 
 # Setting up cgroup rules.
+# Cgroup rules are only required with cgroup v1. With cgroup v2, systemd user slices are used for resource limits.
 group="sashiuser"
 cgroupsuffix="-cg"
 ! sudo groupadd $group && echo "Group creation failed."
-! sudo echo "@$group       cpu,memory              %u$cgroupsuffix" >>/etc/cgrules.conf && echo "Cgroup rule creation failed."
+if [ "$(stat -fc %T /sys/fs/cgroup/)" != "cgroup2fs" ]; then
+    ! echo "@$group       cpu,memory              %u$cgroupsuffix" | sudo tee -a /etc/cgrules.conf >/dev/null && echo "Cgroup rule creation failed."
+fi
 
 # Setting up Sashimono admin group.
 admin_group="sashiadmin"

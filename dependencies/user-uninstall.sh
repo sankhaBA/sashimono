@@ -33,6 +33,11 @@ cleanup_script=$user_dir/uninstall_cleanup.sh
 gp_udp_port_count=2
 gp_tcp_port_count=2
 
+function is_cgroup_v2() {
+    # cgroup v2 (unified hierarchy) is mounted as cgroup2fs. Hybrid setups are treated as cgroup v1.
+    [ "$(stat -fc %T /sys/fs/cgroup/)" == "cgroup2fs" ]
+}
+
 function cgrulesengd_servicename() {
     # Find the cgroups rules engine service.
     local cgrulesengd_filepath=$(grep "ExecStart.*=.*/cgrulesengd$" /etc/systemd/system/*.service | head -1 | awk -F : ' { print $1 } ')
@@ -82,8 +87,13 @@ done
 
 echo "Removing cgroups"
 # Delete config values.
-cgdelete -g cpu:$user$cgroupsuffix
-cgdelete -g memory:$user$cgroupsuffix
+if ! is_cgroup_v2; then
+    cgdelete -g cpu:$user$cgroupsuffix
+    cgdelete -g memory:$user$cgroupsuffix
+fi
+# Remove the user slice resource limits.
+rm -rf "/etc/systemd/system/user-$user_id.slice.d"
+systemctl daemon-reload
 
 # Removing applied disk quota of the user before deleting.
 setquota -g -F vfsv0 "$user" 0 0 0 0 /
@@ -158,7 +168,7 @@ rm -r /home/"${user:?}"
 # It'll be automatically deleted when we delete the user.
 
 cgrulesengd_service=$(cgrulesengd_servicename)
-if [ ! -z "$cgrulesengd_service" ]; then
+if ! is_cgroup_v2 && [ ! -z "$cgrulesengd_service" ]; then
     echo "Restarting the '$cgrulesengd_service' service..."
     systemctl restart $cgrulesengd_service
 fi

@@ -188,7 +188,8 @@ if [ $mode == "reconfig" ]; then
     uninstall="evernode uninstall -q"
     install="curl -fsSL https://stevernode.blob.core.windows.net/evernode-dev-bb7ec110-f72e-430e-b297-9210468a4cbb/setup.sh | cat  | SKIP_SYSREQ=1 bash -s install -q auto auto 1000000 1000000 2097152 3145728 3 Auto_\$HOSTNAME"
 
-    restartcgrs="systemctl restart $cgrulesengd_service.service"
+    # The cgroup rules engine only exists with cgroup v1.
+    restartcgrs="([ \"\$(stat -fc %T /sys/fs/cgroup/)\" == \"cgroup2fs\" ] || systemctl restart $cgrulesengd_service.service)"
     restartsas="systemctl restart $sashimono_service.service"
 
     # Re configure sashimono for given host.

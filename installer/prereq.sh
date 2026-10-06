@@ -5,7 +5,7 @@
 # Adding user disk quota limitation capability
 # Enable user quota in fstab for root mount.
 # Enable cgroup memory and swapaccount capability.
-# Setup cgroups rules engine service.
+# Setup cgroups rules engine service (cgroup v1 only).
 
 echo "---Sashimono prerequisites installer---"
 
@@ -32,7 +32,7 @@ apt-get install -y uidmap fuse3 cgroup-tools quota curl openssl
 # uidmap        # Required for rootless docker.
 # slirp4netns   # Required for high performance rootless networking.
 # fuse3         # Required for hpfs.
-# cgroup-tools  # Required to setup contract instances resource limits.
+# cgroup-tools  # Required to setup contract instances resource limits (cgroup v1).
 # quota         # Required for disk space group quota.
 # curl          # Required to download installation artifacts.
 # openssl       # Required by Sashimono agent to create contract tls certs.
@@ -196,19 +196,24 @@ fi
 # -------------------------------
 stage "Configuring cgroup rules engine"
 
-# Copy cgred.conf from examples if not exists to setup control groups.
-[ ! -f /etc/cgred.conf ] && cp /usr/share/doc/cgroup-tools/examples/cgred.conf /etc/
+# The cgroup rules engine is only required with cgroup v1.
+# With cgroup v2 (unified hierarchy) instance resources are limited using systemd user slices.
+if [ "$(stat -fc %T /sys/fs/cgroup/)" == "cgroup2fs" ]; then
+    echo "cgroup v2 detected. Skipping cgroup rules engine configuration."
+else
+    # Copy cgred.conf from examples if not exists to setup control groups.
+    [ ! -f /etc/cgred.conf ] && cp /usr/share/doc/cgroup-tools/examples/cgred.conf /etc/
 
-# Create new cgconfig.conf if not exists to setup control groups.
-[ ! -f /etc/cgconfig.conf ] && : >/etc/cgconfig.conf
+    # Create new cgconfig.conf if not exists to setup control groups.
+    [ ! -f /etc/cgconfig.conf ] && : >/etc/cgconfig.conf
 
-# Create new cgrules.conf if not exists to setup control groups.
-[ ! -f /etc/cgrules.conf ] && : >/etc/cgrules.conf
+    # Create new cgrules.conf if not exists to setup control groups.
+    [ ! -f /etc/cgrules.conf ] && : >/etc/cgrules.conf
 
-# Setup a service if not exists to run cgroup rules generator.
-cgrulesengd_file="/etc/systemd/system/$cgrulesengd_service.service"
-if ! [ -f "$cgrulesengd_file" ]; then
-    echo "[Unit]
+    # Setup a service if not exists to run cgroup rules generator.
+    cgrulesengd_file="/etc/systemd/system/$cgrulesengd_service.service"
+    if ! [ -f "$cgrulesengd_file" ]; then
+        echo "[Unit]
     Description=cgroups rules generator
     After=network.target
 
@@ -222,10 +227,11 @@ if ! [ -f "$cgrulesengd_file" ]; then
 
     [Install]
     WantedBy=multi-user.target" >$cgrulesengd_file
-    systemctl daemon-reload
+        systemctl daemon-reload
+    fi
+    systemctl enable $cgrulesengd_service
+    systemctl start $cgrulesengd_service
 fi
-systemctl enable $cgrulesengd_service
-systemctl start $cgrulesengd_service
 
 # -------------------------------
 stage "Configuring grub"

@@ -11,6 +11,7 @@
 #include <iostream>
 #include <jsoncons/json.hpp>
 #include <libgen.h>
+#include <linux/magic.h>
 #include <set>
 #include <string>
 #include <string_view>
@@ -18,6 +19,7 @@
 #include <sys/mount.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
+#include <sys/statfs.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/wait.h>

@@ -1104,16 +1104,23 @@ echo "Setting up user slice resources."
 cores=$(grep -c ^processor /proc/cpuinfo)
 cpu_period=1000000
 cpu_quota=$(expr $(expr $cores \* $cpu \* 100 \/ $cpu_period))
+[ $cpu_quota -lt 1 ] && cpu_quota=1 # CPUQuota should be at least 1%.
+
+# Received swap memory quota includes the memory quota (memory.memsw.limit_in_bytes semantics in cgroup v1).
+# MemorySwapMax (memory.swap.max in cgroup v2) excludes the memory, so take only the swap portion.
+swap_only_mem=$((swapmem - memory))
+[ $swap_only_mem -lt 0 ] && swap_only_mem=0
 
 # Resource limiting for the unpriviledged user
-mkdir /etc/systemd/system/user-$user_id.slice.d
-touch /etc/systemd/system/user-$user_id.slice.d/override.conf
+# This is the resource limiting mechanism with cgroup v2. With cgroup v1, the cgroup rules engine moves
+# user processes into the cgroups created by user-cgcreate.sh.
+mkdir -p /etc/systemd/system/user-$user_id.slice.d
 echo "[Slice]
 MemoryAccounting=true
 CPUAccounting=true
 MemoryMax=${memory}K
-CPUQuota=${cpu_quota}% 
-MemorySwapMax=${swapmem}K" | sudo tee /etc/systemd/system/user-$user_id.slice.d/override.conf
+CPUQuota=${cpu_quota}%
+MemorySwapMax=${swap_only_mem}K" | sudo tee /etc/systemd/system/user-$user_id.slice.d/override.conf
 
 # save and make sure nft tables service persist after a restart
 nft list ruleset > /etc/nftables.conf

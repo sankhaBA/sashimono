@@ -27,7 +27,7 @@
     reputationd_script_dir=$(dirname "$(realpath "$0")")
     root_user="root"
 
-    repo_owner="EvernodeXRPL"
+    repo_owner="sankhaBA"
     repo_name="evernode-resources"
     desired_branch="main"
 
@@ -1779,7 +1779,7 @@ WantedBy=timers.target" >/etc/systemd/system/$EVERNODE_AUTO_UPDATE_SERVICE.timer
             echomult "There was an error in updating sashimono configuration." && return 1
 
         # Update cgroup allocations.
-        ([[ $alloc_ramKB -gt 0 ]] || [[ $alloc_swapKB -gt 0 ]] || [[ $alloc_instcount -gt 0 ]]) &&
+        ([[ $alloc_cpu -gt 0 ]] || [[ $alloc_ramKB -gt 0 ]] || [[ $alloc_swapKB -gt 0 ]] || [[ $alloc_instcount -gt 0 ]]) &&
             echomult "Updating the cgroup configuration..." &&
             ! $SASHIMONO_BIN/user-cgcreate.sh $SASHIMONO_DATA && echomult "Error occured while upgrading cgroup allocations" && return 1
 
@@ -2387,8 +2387,12 @@ WantedBy=timers.target" >/etc/systemd/system/$EVERNODE_AUTO_UPDATE_SERVICE.timer
         [ ! -f "$MB_XRPL_CONFIG" ] && set_ipv6_subnet
         [ "$ipv6_subnet" != "-" ] && [ "$ipv6_net_interface" != "-" ] && echo -e "Using $ipv6_subnet IPv6 subnet on $ipv6_net_interface for contract instances.\n"
 
-        set_cgrules_svc
-        echo -e "Using '$cgrulesengd_service' as cgroups rules engine service.\n"
+        if [ "$(stat -fc %T /sys/fs/cgroup/)" == "cgroup2fs" ]; then
+            echo -e "Using cgroup v2 with systemd user slices for contract instance resource limits.\n"
+        else
+            set_cgrules_svc
+            echo -e "Using '$cgrulesengd_service' as cgroups rules engine service.\n"
+        fi
 
         [ ! -f "$SASHIMONO_CONFIG" ] && set_instance_alloc
         echo -e "Using allocation $(GB $alloc_ramKB) memory, $(GB $alloc_swapKB) Swap, $(GB $alloc_diskKB) disk space, distributed among $alloc_instcount contract instances.\n"

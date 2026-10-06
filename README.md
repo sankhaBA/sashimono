@@ -20,6 +20,15 @@ Tested on Ubuntu 20.04
 1. Reboot the machine.
 1. Run `./dev-setup.sh`
 
+### Contract instance resource limits (cgroups)
+
+Both cgroup v1 and cgroup v2 hosts are supported. The cgroup version is detected at runtime (`stat -fc %T /sys/fs/cgroup/` returns `cgroup2fs` on cgroup v2, hybrid setups are treated as cgroup v1).
+
+- **cgroup v1** - The cgroup rules engine (`cgrulesengd`) moves processes of the `sashiuser` group into per-user `<user>-cg` cgroups created by `user-cgcreate.sh`.
+- **cgroup v2** - Per-instance limits are applied on the systemd user slice of each instance user (`/etc/systemd/system/user-<uid>.slice.d/override.conf`). The cgroup rules engine is not used.
+
+In both cases the `sashimono-cgcreate` service re-applies the limits at system startup.
+
 ## Build Sashimono Agent
 
 1. Run `git submodule update --init --recursive` to clone the bootstrap contract for first time.

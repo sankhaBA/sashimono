@@ -110,6 +110,12 @@ namespace hp
 
     int get_instance(std::string &error_msg, std::string_view container_name, hp::instance_info &instance);
 
+    bool is_cgroup_v2();
+
+    bool cgroup_v2_ready();
+
+    bool cgroup_v1_ready();
+
     bool system_ready();
 
     void get_vacant_ports_list(std::vector<hp::ports> &vacant_ports);

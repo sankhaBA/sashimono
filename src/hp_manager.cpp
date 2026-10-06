@@ -61,7 +61,13 @@ namespace hp
     constexpr const char *DOCKER_CONTAINER_NOT_FOUND = "container_not_found";
     constexpr const char *INSTANCE_ALREADY_EXISTS = "instance_already_exists";
 
-    // Cgrules check related constants.
+    // Cgroup check related constants.
+    constexpr const char *CGROUP_ROOT_DIR = "/sys/fs/cgroup";
+    constexpr const char *CGROUP_V2_CONTROLLERS = "/sys/fs/cgroup/cgroup.controllers";
+    constexpr const char *CGROUP_V2_CPU_REGEXP = "(^|\\s)cpu(\\s|$)";
+    constexpr const char *CGROUP_V2_MEM_REGEXP = "(^|\\s)memory(\\s|$)";
+
+    // Cgrules check related constants (cgroup v1).
     constexpr const char *CGRULE_ACTIVE = "service=$(grep \"ExecStart.*=.*/cgrulesengd$\" /etc/systemd/system/*.service | head -1 | awk -F : ' { print $1 } ') && [ ! -z $service ] && systemctl is-active $(basename $service)";
     constexpr const char *CGRULE_CPU_DIR = "/sys/fs/cgroup/cpu";
     constexpr const char *CGRULE_MEM_DIR = "/sys/fs/cgroup/memory";
@@ -1099,10 +1105,60 @@ namespace hp
         }
     }
     /**
-     * Check whether there's a pending reboot and cgrules service is running and configured.
+     * Check whether the cgroup v2 (unified hierarchy) is mounted. Hybrid setups are treated as cgroup v1
+     * since the cpu and memory controllers are attached to the v1 hierarchies.
+     * @return true if cgroup v2 is mounted otherwise false.
+     */
+    bool is_cgroup_v2()
+    {
+        struct statfs buf;
+        if (statfs(CGROUP_ROOT_DIR, &buf) == -1)
+        {
+            LOG_ERROR << errno << ": Error checking the cgroup filesystem type.";
+            return false;
+        }
+
+        return buf.f_type == CGROUP2_SUPER_MAGIC;
+    }
+
+    /**
+     * Check whether cpu and memory controllers are available in cgroup v2. Resource limits are applied using
+     * systemd user slices, So the controllers need to be available in the root cgroup.
+     * @return true if available otherwise false.
+     */
+    bool cgroup_v2_ready()
+    {
+        const int fd = open(CGROUP_V2_CONTROLLERS, O_RDONLY);
+        if (fd == -1)
+        {
+            LOG_ERROR << errno << ": Error opening the cgroup controllers file.";
+            return false;
+        }
+
+        std::string buf;
+        if (util::read_from_fd(fd, buf, 0) == -1)
+        {
+            LOG_ERROR << errno << ": Error reading the cgroup controllers file.";
+            close(fd);
+            return false;
+        }
+
+        close(fd);
+
+        if (!std::regex_search(buf, std::regex(CGROUP_V2_CPU_REGEXP)) || !std::regex_search(buf, std::regex(CGROUP_V2_MEM_REGEXP)))
+        {
+            LOG_ERROR << "Cgroup cpu or memory controller is not available.";
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Check whether cgrules service is running and configured (cgroup v1).
      * @return true if active and configured otherwise false.
      */
-    bool system_ready()
+    bool cgroup_v1_ready()
     {
         char buffer[20];
 
@@ -1147,16 +1203,29 @@ namespace hp
             return false;
         }
 
+        return true;
+    }
+
+    /**
+     * Check whether there's a pending reboot and cgroups are configured for resource limiting.
+     * @return true if ready otherwise false.
+     */
+    bool system_ready()
+    {
+        if (is_cgroup_v2() ? !cgroup_v2_ready() : !cgroup_v1_ready())
+            return false;
+
         // Check there's a pending reboot.
         if (util::is_file_exists(REBOOT_FILE))
         {
-            fd = open(REBOOT_FILE, O_RDONLY);
+            const int fd = open(REBOOT_FILE, O_RDONLY);
             if (fd == -1)
             {
                 LOG_ERROR << errno << ": Error opening the reboot file.";
                 return false;
             }
 
+            std::string buf;
             if (util::read_from_fd(fd, buf, 0) == -1)
             {
                 LOG_ERROR << errno << ": Error reading the reboot file.";
