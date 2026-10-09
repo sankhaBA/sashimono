@@ -150,60 +150,10 @@ user_runtime_dir="/run/user/$user_id"
 dockerd_socket="unix://$user_runtime_dir/docker.sock"
 
 echo "checking quota system, and adding disk quota of $disk to the user $user"
-if [[ "$(quotaon -p / | grep user | awk '{print $7}')" == "off" ]]; then
-    echo "User quota found not enabled, enabling user quota system..."
-            
-    # Check if we are in a VM, and if linux-image-extra-virtual is installed
-    if [ "$(systemd-detect-virt)" != "none" ]; then
-        echo "Running in a VM: $(systemd-detect-virt)"
-        if ! dpkg -l linux-image-extra-virtual | grep -q '^ii'; then
-            echo "linux-image-extra-virtual not installed. Installing now..."
-            apt-get update && apt-get -y install linux-image-extra-virtual
-        else
-            echo "linux-image-extra-virtual is already installed."
-            echo; echo "do we need to reboot ?"; echo
-        fi
-    else
-        echo "Not running in a VM. Skipping linux-image-extra-virtual installation."
-    fi
-
-    {
-        if ! grep -q ",usrquota" /etc/fstab; then
-            # Backup fstab 1st
-            BACKUP="/etc/fstab.backup.$(date +%Y%m%d_%H%M%S)"
-            cp /etc/fstab "$BACKUP"
-            # First remove any existing quota options
-            sed -i -E '/^[^#]*\s+\/\s+/ {
-                s/,?grpjquota=[^,[:space:]]*//g
-                s/,?usrjquota=[^,[:space:]]*//g
-                s/,?jqfmt=[^,[:space:]]*//g
-                s/,?usrquota[^,[:space:]]*//g
-                s/,?grpquota[^,[:space:]]*//g
-                s/,?quota[^,[:space:]]*//g
-                s/remount-ro[^,[:space:]]*/remount-ro/g
-                s/,,+/,/g
-                s/(\s+)([^,\s]+),/\1\2/
-            }' /etc/fstab
-            # then add just usrquota entry
-            sed -i -E '/^[^#]*\s+\/\s+/ {s/(\s+\S+)(\s+[0-9]+\s+[0-9]+\s*)$/\1,usrquota\2/}' /etc/fstab
-        fi
-    } || {
-        echo "Failed - rolling back..."
-        cp "$BACKUP" /etc/fstab
-        mount -o remount / 2>/dev/null || true
-    }
-    {
-        ROOT_MOUNT=$(findmnt -n -o TARGET /)
-        quotaoff "$ROOT_MOUNT" 2>/dev/null || true
-        rm -f "$ROOT_MOUNT"/quota.* "$ROOT_MOUNT"/aquota.* 2>/dev/null || true
-        sync && systemctl daemon-reload && mount -o remount "$ROOT_MOUNT"
-        quotacheck -cum "$ROOT_MOUNT" && quotaon -u "$ROOT_MOUNT"
-        quotaon -p "$ROOT_MOUNT" | grep user
-    } || {
-        echo "something failed when setting up user quota system..."
-    }
+if [[ "$(quotaon -p / | grep group | awk '{print $7}')" == "off" ]]; then
+    rollback "QUOTA_OFF"
 fi
-setquota -u "$user" "$disk" "$disk" 0 0 / && echo "Configured disk quota of $disk for the user $user" || echo "Configuring disk quota failed"
+setquota -g -F vfsv0 "$user" "$disk" "$disk" 0 0 / && echo "Configured disk quota of $disk for the user $user" || echo "Configuring disk quota failed"
 
 # Extract additional port settings if present, 1st it splits everything after :, then replaces all -- with  |, and uses that to create an array
 echo
@@ -1002,7 +952,7 @@ chmod +x "$user_dir"/.docker/docker_recreate.sh
 
 quota_crontab_awk_cmd="awk ''\'NR==3 {print \\\\\$2}''\'"
 quota_crontab_sed_cmd='sed \\"s/^DISK_USED_BYTES=.*/DISK_USED_BYTES=\\$USED_BYTES/\\"'
-quota_crontab_entry='echo "*/5 * * * * USED_BYTES=\\$(quota -u '${user}' 2>/dev/null | '${quota_crontab_awk_cmd}' || echo \\"0\\") && '${quota_crontab_sed_cmd}' \\"'${user_dir}'/'${contract_dir}'/env.vars\\" > \\"'${user_dir}'/'${contract_dir}'/env.vars.tmp\\" && [ -s '${user_dir}'/'${contract_dir}'/env.vars.tmp ] && mv \\"'${user_dir}'/'${contract_dir}'/env.vars.tmp\\" \\"'${user_dir}'/'${contract_dir}'/env.vars\\"" | crontab -'
+quota_crontab_entry='echo "*/5 * * * * USED_BYTES=\\$(quota -g '${user}' 2>/dev/null | '${quota_crontab_awk_cmd}' || echo \\"0\\") && '${quota_crontab_sed_cmd}' \\"'${user_dir}'/'${contract_dir}'/env.vars\\" > \\"'${user_dir}'/'${contract_dir}'/env.vars.tmp\\" && [ -s '${user_dir}'/'${contract_dir}'/env.vars.tmp ] && mv \\"'${user_dir}'/'${contract_dir}'/env.vars.tmp\\" \\"'${user_dir}'/'${contract_dir}'/env.vars\\"" | crontab -'
 domain_ssl_update_1='(crontab -l 2>/dev/null; echo "0 0 */7 * * sleep \\$((RANDOM*3540/32768)) && /usr/bin/bash '${user_dir}'/.docker/domain_ssl_update.sh 2>&1 | tee -a '${user_dir}'/.docker/domain_ssl_update.log") | crontab -'
 domain_ssl_update_2='bash "'${user_dir}'/.docker/domain_ssl_update.sh" 2>&1 | tee -a '${user_dir}'/.docker/domain_ssl_update.log'
 
@@ -1048,7 +998,7 @@ else
     echo "no user custom docker settings detected, only adding env.vars file and quota system."
     quota_crontab_awk_cmd="awk ''\'NR==3 {print \\\\\$2}''\'"
     quota_crontab_sed_cmd='sed \\"s/^DISK_USED_BYTES=.*/DISK_USED_BYTES=\\$USED_BYTES/\\"'
-    quota_crontab_entry='echo "*/5 * * * * USED_BYTES=\\$(quota -u '${user}' 2>/dev/null | '${quota_crontab_awk_cmd}' || echo \\"0\\") && '${quota_crontab_sed_cmd}' \\"'${user_dir}'/'${contract_dir}'/env.vars\\" > \\"'${user_dir}'/'${contract_dir}'/env.vars.tmp\\" && [ -s '${user_dir}'/'${contract_dir}'/env.vars.tmp ] && mv \\"'${user_dir}'/'${contract_dir}'/env.vars.tmp\\" \\"'${user_dir}'/'${contract_dir}'/env.vars\\"" | crontab -'
+    quota_crontab_entry='echo "*/5 * * * * USED_BYTES=\\$(quota -g '${user}' 2>/dev/null | '${quota_crontab_awk_cmd}' || echo \\"0\\") && '${quota_crontab_sed_cmd}' \\"'${user_dir}'/'${contract_dir}'/env.vars\\" > \\"'${user_dir}'/'${contract_dir}'/env.vars.tmp\\" && [ -s '${user_dir}'/'${contract_dir}'/env.vars.tmp ] && mv \\"'${user_dir}'/'${contract_dir}'/env.vars.tmp\\" \\"'${user_dir}'/'${contract_dir}'/env.vars\\"" | crontab -'
     echo "no custom port or other user settings found. setting up recreate service to copy .vars file and default domain-farwading/proxy-host"
     if [[ "$TLS_TYPE" == "NPMplus" ]] && [[ "$docker_pull_image" != *"reputation"* ]]; then
         domain_ssl_update_1='(crontab -l 2>/dev/null; echo "0 0 */7 * * sleep \\$((RANDOM*3540/32768)) && /usr/bin/bash '${user_dir}'/.docker/domain_ssl_update.sh 2>&1 | tee -a '${user_dir}'/.docker/domain_ssl_update.log") | crontab -'

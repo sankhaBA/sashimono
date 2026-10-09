@@ -2,8 +2,8 @@
 # Sashimono Ubuntu prerequisites installation script.
 # This must be executed with root privileges.
 
-# Adding user disk quota limitation capability
-# Enable user quota in fstab for root mount.
+# Adding group disk quota limitation capability
+# Enable group quota in fstab for root mount.
 # Enable cgroup memory and swapaccount capability.
 # Setup cgroups rules engine service (cgroup v1 only).
 
@@ -88,7 +88,7 @@ fi
 # Replace temp file with original only if success.
 
 # Root entry pattern: <Not starting with a comment><Not whitespace(Device)><Whitespace></><Whitespace><Not whitespace(FS type)><Whitespace><No whitespace(Options)><Whitespace><Number(Dump)><Whitespace><Number(Pass)>
-# Options must contain usrquota. ext4 refuses to mount when usrquota is mixed with journaled quota options
+# Options must contain grpquota. ext4 refuses to mount when grpquota is mixed with journaled quota options
 # (usrjquota, grpjquota, jqfmt), so those and other quota options are removed from the options.
 # Options are rewritten only if they differ from the expected ones.
 stage "Configuring fstab"
@@ -98,18 +98,18 @@ root_opts=$(sed -n -r -e "/$root_entry/{ s/^\S+\s+\/\s+\S+\s+(\S+).*/\1/p; q }" 
 
 IFS=',' read -r -a opts <<<"$root_opts"
 new_opts=()
-has_usrquota=0
+has_grpquota=0
 for opt in "${opts[@]}"; do
     case "$opt" in
-    usrquota)
+    grpquota)
         new_opts+=("$opt")
-        has_usrquota=1
+        has_grpquota=1
         ;;
-    usrjquota=* | grpjquota=* | jqfmt=* | grpquota | quota | noquota) ;; # Cannot be mixed with usrquota.
+    usrquota | usrjquota=* | grpjquota=* | jqfmt=* | quota | noquota) ;; # Cannot be mixed with grpquota.
     *) new_opts+=("$opt") ;;
     esac
 done
-[ $has_usrquota -eq 0 ] && new_opts+=("usrquota")
+[ $has_grpquota -eq 0 ] && new_opts+=("grpquota")
 new_root_opts=$(IFS=','; echo "${new_opts[*]}")
 
 if [ "$new_root_opts" != "$root_opts" ]; then
@@ -121,7 +121,7 @@ if [ "$new_root_opts" != "$root_opts" ]; then
     cp $originalfstab $backup
     mv "$tmpfstab" $originalfstab
     # Quota options cannot be changed while quota is on.
-    quotaoff -ug / >/dev/null 2>&1
+    quotaoff -g / >/dev/null 2>&1
     if ! mount -o remount / 2>&1; then
         # Journaled quota options of the current mount persist across remounts, so they can only be cleared with a reboot.
         if findmnt -no OPTIONS / | grep -qE "usrjquota=|grpjquota=|jqfmt="; then
@@ -138,10 +138,10 @@ else
     echo "fstab already configured."
 fi
 
-# Check and turn on user quota if not enabled.
-[ ! -f /aquota.user ] && quotacheck -cum /
-if ! quotaon -pu / 2>/dev/null | grep -q "is on"; then
-    ! quotaon -u / && echo "Enabling user quota failed." && exit 1
+# Check and turn on group quota if not enabled.
+[ ! -f /aquota.group ] && quotacheck -cgm /
+if ! quotaon -pg / 2>/dev/null | grep -q "is on"; then
+    ! quotaon -g / && echo "Enabling group quota failed." && exit 1
 fi
 
 # -------------------------------
