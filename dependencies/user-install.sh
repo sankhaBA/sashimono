@@ -248,7 +248,7 @@ for ((i = 1; i < ${#image_array[@]}; i += 2)); do
             internal_env2_value=${image_array_value#*-}
             internal_env2_value=${internal_env2_value//__/ }
             internal_env2_value=${internal_env2_value//../$}
-            echo "found env1, key>$internal_env2_key value>$internal_env2_value"
+            echo "found env2, key>$internal_env2_key value>$internal_env2_value"
         fi
         if [[ "$image_array_name" == "env3" ]]; then
             custom_docker_settings="true"
@@ -256,7 +256,7 @@ for ((i = 1; i < ${#image_array[@]}; i += 2)); do
             internal_env3_value=${image_array_value#*-}
             internal_env3_value=${internal_env3_value//__/ }
             internal_env3_value=${internal_env3_value//../$}
-            echo "found env1, key>$internal_env3_key value>$internal_env3_value"
+            echo "found env3, key>$internal_env3_key value>$internal_env3_value"
         fi
         if [[ "$image_array_name" == "env4" ]]; then
             custom_docker_settings="true"
@@ -264,7 +264,7 @@ for ((i = 1; i < ${#image_array[@]}; i += 2)); do
             internal_env4_value=${image_array_value#*-}
             internal_env4_value=${internal_env4_value//__/ }
             internal_env4_value=${internal_env4_value//../$}
-            echo "found env1, key>$internal_env4_key value>$internal_env4_value"
+            echo "found env4, key>$internal_env4_key value>$internal_env4_value"
         fi
     fi
 done
@@ -352,7 +352,7 @@ for ((i = 0; i < $gp_tcp_port_count; i++)); do
     fi
 done
 
-# Creating AppArmor Profile for unpriviledged user on Ubuntu 24.04
+# Creating AppArmor Profile for unprivileged user on Ubuntu 24.04
 if [ "$osversion" == "24.04" ]; then
     filename=$(echo /home/$user/bin/rootlesskit | sed -e s@^/@@ -e s@/@.@g)
     cat <<EOF > /etc/apparmor.d/$filename
@@ -532,7 +532,7 @@ else
         echo "$IMAGE_DIGEST" > ${img_local_path}/image_digest
         echo "docker image pulled, and saved as a tarball at $img_local_tar_path. and refreshed image digest record"
     else
-        echo "File hash matches docker hub, AND the Rate limit result is above 60 (=${RATE_LIMIT_REMAINING})"
+        echo "Using cached image (digest unchanged, or rate limit too low/unknown to re-pull: remaining=${RATE_LIMIT_REMAINING})"
         echo "local hash = $(cat ${img_local_path}/image_digest)"
         echo "docker hash = ${IMAGE_DIGEST}"
         echo "skipping image pull."
@@ -632,10 +632,10 @@ if [[ -n "\$custom_docker_domain" ]]; then
     contract_publickey=\$(jq -r ".contract.bin_args | select( . != null )" "$user_dir/$contract_dir/cfg/hp.cfg") || true
     domain_txtrecord=\$(dig +short +time=10 +tries=3 TXT "\$custom_docker_domain" @1.1.1.1)
     if echo "\$domain_txtrecord" | grep -q "\$contract_publickey"; then
-        echo "contract pubic key, '\$contract_publickey'"
+        echo "contract public key, '\$contract_publickey'"
         echo "domain authorized, as found in the TXT records of \$custom_docker_domain, :\$domain_txtrecord"
     else
-        echo "contract pubic key, '\$contract_publickey'"
+        echo "contract public key, '\$contract_publickey'"
         echo "domain NOT authorized as NOT found in the TXT records of \$custom_docker_domain, :\$domain_txtrecord"
         echo "not adding domain !"
         tls_type="failed"
@@ -996,12 +996,12 @@ else
     quota_crontab_awk_cmd="awk ''\'NR==3 {print \\\\\$2}''\'"
     quota_crontab_sed_cmd='sed \\"s/^DISK_USED_BYTES=.*/DISK_USED_BYTES=\\$USED_BYTES/\\"'
     quota_crontab_entry='echo "*/5 * * * * USED_BYTES=\\$(quota -g '${user}' 2>/dev/null | '${quota_crontab_awk_cmd}' || echo \\"0\\") && '${quota_crontab_sed_cmd}' \\"'${user_dir}'/'${contract_dir}'/env.vars\\" > \\"'${user_dir}'/'${contract_dir}'/env.vars.tmp\\" && [ -s '${user_dir}'/'${contract_dir}'/env.vars.tmp ] && mv \\"'${user_dir}'/'${contract_dir}'/env.vars.tmp\\" \\"'${user_dir}'/'${contract_dir}'/env.vars\\"" | crontab -'
-    echo "no custom port or other user settings found. setting up recreate service to copy .vars file and default domain-farwading/proxy-host"
+    echo "no custom port or other user settings found. setting up recreate service to copy .vars file and default domain-forwarding/proxy-host"
     if [[ "$TLS_TYPE" == "NPMplus" ]] && [[ "$docker_pull_image" != *"reputation"* ]]; then
         domain_ssl_update_1='(crontab -l 2>/dev/null; echo "0 0 */7 * * sleep \\$((RANDOM*3540/32768)) && /usr/bin/bash '${user_dir}'/.docker/domain_ssl_update.sh 2>&1 | tee -a '${user_dir}'/.docker/domain_ssl_update.log") | crontab -'
         domain_ssl_update_2='bash "'${user_dir}'/.docker/domain_ssl_update.sh" 2>&1 | tee -a '${user_dir}'/.docker/domain_ssl_update.log'
     else
-        domain_ssl_update_1='echo "NPMplus NOT intalled on host,"'
+        domain_ssl_update_1='echo "NPMplus NOT installed on host,"'
         domain_ssl_update_2='echo "or reputation contract detected."'
     fi
 
@@ -1058,7 +1058,7 @@ cpu_quota=$(expr $(expr $cores \* $cpu \* 100 \/ $cpu_period))
 swap_only_mem=$((swapmem - memory))
 [ $swap_only_mem -lt 0 ] && swap_only_mem=0
 
-# Resource limiting for the unpriviledged user
+# Resource limiting for the unprivileged user
 # This is the resource limiting mechanism with cgroup v2. With cgroup v1, the cgroup rules engine moves
 # user processes into the cgroups created by user-cgcreate.sh.
 mkdir -p /etc/systemd/system/user-$user_id.slice.d

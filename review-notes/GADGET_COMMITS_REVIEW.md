@@ -119,7 +119,7 @@ Testing did not show problems because most of the risky code only runs in specia
 | L2 | Leaks on rollback and uninstall | 🔵 Low | Reliability | Confirmed | Easy | Open |
 | L3 | Open-file limit change may lower limits on big hosts | 🔵 Low | Behaviour change | Likely | Easy | Open |
 | L4 | Dead code, unused variables, debug leftovers | 🔵 Low | Code quality | Confirmed | Easy | Open |
-| L5 | Copy-paste errors and typos in messages | 🔵 Low | Code quality | Confirmed | Easy | Open |
+| L5 | Copy-paste errors and typos in messages | 🔵 Low | Code quality | Confirmed | Easy | ✅ Fixed |
 | L6 | Repeated code blocks | 🔵 Low | Code quality | Confirmed | Easy | Open |
 | L7 | Scripts generated through 3 to 4 levels of escaping | 🔵 Low | Maintainability | Confirmed | Medium | Open |
 | L8 | Weak error handling patterns | 🔵 Low | Code quality | Confirmed | Easy | Open |
@@ -426,7 +426,7 @@ Testing did not show problems because most of the risky code only runs in specia
 - The `version=` variable was bumped by hand (`0.99` → `1.9`) and has no link to releases.
 - **Easy.**
 
-#### L5. Copy-paste errors and typos in messages
+#### L5. Copy-paste errors and typos in messages, ✅ FIXED
 
 - `env2`, `env3` and `env4` all print "found env1".
 - Typos: "intalled", "farwading", "pubic key", "settig", "unpriviledged".
@@ -556,3 +556,25 @@ A fuller explanation of this whole area, written for someone with no quota/fstab
 - **Not changed:** Instances created before this fix with custom settings keep running unconfined until they are redeployed. Other differences between the recreated and the agent's container belong to M6.
 
 A fuller explanation is in `changes/[H3] Seccomp and AppArmor disabled on recreated containers.md`.
+A fuller explanation of this whole area, written for someone with no quota/fstab background, is in `quota-and-fstab-history-explained.md` in this same folder.
+
+### 2026-10-12: L5 fixed (copy-paste errors and typos in messages)
+
+- **Findings closed:** L5.
+- **Files changed:** `dependencies/user-install.sh` (10 lines, text only).
+- **What changed:**
+  - The env2, env3 and env4 parsing blocks now print `found env2`, `found env3` and `found env4`. Before, all of them printed `found env1`.
+  - Typos fixed:
+    - `unpriviledged` → `unprivileged` (2 comments)
+    - `pubic key` → `public key` (2 log lines in the generated `domain_ssl_update.sh`)
+    - `farwading` → `forwarding` (install log)
+    - `intalled` → `installed` (text in the cron job string)
+  - The image-cache `else` branch printed "File hash matches docker hub, AND the Rate limit result is above 60" even though it also runs when the digest differs but the rate limit is too low or unknown. It now prints `Using cached image (digest unchanged, or rate limit too low/unknown to re-pull: remaining=...)`, which is true in every case that reaches that branch.
+- **Why:** These messages are what an operator reads when debugging a failed or odd instance creation. Wrong env numbers and a false "hash matches" line point them at the wrong cause.
+- **Not changed:**
+  - `settig`, listed in the original finding, no longer exists anywhere in the repo, so there was nothing to fix.
+  - The digest-file mismatch in the same image-cache block (one file is written and a different one is read) is a logic bug and belongs to M5. It was deliberately left for that fix.
+  - Escaping inside the heredoc (`\$contract_publickey`) and the quoted cron string was left exactly as it was. Only the misspelled words changed.
+- **Verified:** `bash -n dependencies/user-install.sh` passes. A `grep` for the old typos finds nothing. `git diff` shows only text inside `echo` and comment lines.
+
+Explanation: `changes/2. copy-paste-errors-and-typos-in-messages-explained.md`.
