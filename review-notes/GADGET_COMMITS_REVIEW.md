@@ -43,7 +43,7 @@ Testing did not show problems because most of the risky code only runs in specia
 2. **C2.** At runtime, the install script can **delete the disk quotas of every running instance**.
 3. **C3.** The host's **wildcard TLS private key can be copied into tenant containers**.
 4. **C4.** The custom-domain "authorization" check can be bypassed. A tenant can then **take over other proxy hosts on the same NPMplus**.
-5. **H3.** Using any custom image setting recreates the container **without seccomp and AppArmor protection**.
+5. **H3.** Using any custom image setting recreates the container **without seccomp and AppArmor protection**. ✅ **FIXED**, see the Fix log (section 8).
 
 ---
 
@@ -98,7 +98,7 @@ Testing did not show problems because most of the risky code only runs in specia
 | C4 | Domain authorization can be bypassed, so a tenant can hijack proxy hosts | 🔴 Critical | Security | Confirmed | Medium | Open |
 | H1 | NPMplus admin token stored in tenant-owned files | 🟠 High | Security | Verified | Medium | Open |
 | H2 | Disk quota changed from group to user, which likely leaves gaps | 🟠 High | Resource limits | Likely | Medium | ✅ Fixed |
-| H3 | Recreated containers run without seccomp/AppArmor | 🟠 High | Security | Confirmed | Easy | Open |
+| H3 | Recreated containers run without seccomp/AppArmor | 🟠 High | Security | Confirmed | Easy | ✅ Fixed |
 | H4 | Root runs a tenant-owned cleanup script on uninstall | 🟠 High | Security | Confirmed | Medium | Open |
 | H5 | Code downloaded at runtime from a personal GitHub branch | 🟠 High | Security / supply chain | Confirmed | Easy | Open |
 | H6 | Packages (including a kernel) installed during instance creation | 🟠 High | Operations | Confirmed | Easy | ✅ Fixed |
@@ -212,7 +212,7 @@ Testing did not show problems because most of the risky code only runs in specia
   - Make uninstall clear the same quota type that install set.
 - **Feasibility:** Medium (needs testing on ext4 and XFS hosts).
 
-#### H3. Recreated containers run without seccomp/AppArmor (Confirmed)
+#### H3. Recreated containers run without seccomp/AppArmor (Confirmed), ✅ FIXED
 
 - **Where:** [user-install.sh:983-984](dependencies/user-install.sh#L983-L984), inside the generated `docker_recreate.sh`.
 - **What happens:** If the image tag has **any** custom setting (for example `--peer--1234`), the container that Sashimono created is deleted. A new one is created with `--security-opt seccomp=unconfined --security-opt apparmor=unconfined`. The agent's own `DOCKER_CREATE` command ([hp_manager.cpp:34](src/hp_manager.cpp#L34)) does **not** use these options.
@@ -545,4 +545,14 @@ This section records fixes applied after the review above was written. The findi
 - **Why:** a tenant's container can run more than one internal identity (the main process and a separate "contract user" process), and both map onto the same private Linux group on the host. Group quota counts every identity in that group against one shared limit. User quota only counts the one identity it is set for, so a tenant could exceed their real disk allowance through the identity that was never being measured.
 - **Deliberately not done:** keeping a second `setquota -u` limit alongside the group limit, as a "belt and suspenders" measure, was considered and rejected. Two quota mechanisms that both need to be kept in sync between install and uninstall is exactly the condition that caused this bug in the first place.
 
-A fuller explanation of this whole area, written for someone with no quota/fstab background, is in `quota-and-fstab-history-explained.md` in this same folder.
+A fuller explanation of this whole area, written for someone with no quota/fstab background, is in `changes/[C1, C2, H2, H6] Disk quota and fstab history explained.md`.
+
+### 2026-10-12: H3 fixed (seccomp/AppArmor no longer disabled on recreated containers)
+
+- **Findings closed:** H3.
+- **Files changed:** `dependencies/user-install.sh`.
+- **What changed:** In the generated `docker_recreate.sh`, the `--security-opt seccomp=unconfined --security-opt apparmor=unconfined` line (and its comment) was deleted. Recreated containers now get Docker's default seccomp and AppArmor profiles, the same as the agent's own `DOCKER_CREATE` in `src/hp_manager.cpp`.
+- **Why:** Any custom image setting caused the container to be recreated with both protections off, so any tenant could switch off the kernel syscall filter just by adding a setting to the image name. An image cannot request these options itself, so removing the line is enough; no detection or blocking logic is needed.
+- **Not changed:** Instances created before this fix with custom settings keep running unconfined until they are redeployed. Other differences between the recreated and the agent's container belong to M6.
+
+A fuller explanation is in `changes/[H3] Seccomp and AppArmor disabled on recreated containers.md`.

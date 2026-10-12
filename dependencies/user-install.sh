@@ -930,9 +930,6 @@ done
 # Add Environment variables
 docker_create_command="\$docker_create_command --env-file $user_dir/.docker/env.vars"
 
-# Add security options
-docker_create_command="\$docker_create_command --security-opt seccomp=unconfined --security-opt apparmor=unconfined"
-
 # Add restart policy
 docker_create_command="\$docker_create_command --restart unless-stopped"
 
