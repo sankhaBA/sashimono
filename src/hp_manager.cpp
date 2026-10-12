@@ -171,7 +171,14 @@ namespace hp
         //     return -1;
         // }
 
-        std::string image_name = image;
+        // user-install.sh needs the full image name to read the tenant's settings. Docker needs it without them.
+        std::string docker_image;
+        if (strip_image_settings(image, docker_image) == -1)
+        {
+            error_msg = DOCKER_IMAGE_INVALID;
+            LOG_ERROR << "Provided docker image is not valid: " << image;
+            return -1;
+        }
 
         ports instance_ports;
         if (!vacant_ports.empty())
@@ -194,7 +201,7 @@ namespace hp
         std::string username;
         if (install_user(
                 user_id, username, instance_resources.cpu_us, instance_resources.mem_kbytes, instance_resources.swap_kbytes,
-                instance_resources.storage_kbytes, container_name, instance_ports, image_name, outbound_ipv6, outbound_net_interface) == -1)
+                instance_resources.storage_kbytes, container_name, instance_ports, image, outbound_ipv6, outbound_net_interface) == -1)
         {
             error_msg = USER_INSTALL_ERROR;
             return -1;
@@ -202,13 +209,8 @@ namespace hp
 
         const std::string contract_dir = util::get_user_contract_dir(username, container_name);
 
-        auto pos = image_name.find("--");
-        if (pos != std::string::npos) {
-            image_name = image_name.substr(0, pos);
-        }
-
         if (create_contract(username, owner_pubkey, contract_id, contract_dir, instance_ports, info) == -1 ||
-            create_container(username, image_name, container_name, contract_dir, instance_ports, info) == -1)
+            create_container(username, docker_image, container_name, contract_dir, instance_ports, info) == -1)
         {
             error_msg = INSTANCE_ERROR;
             LOG_ERROR << "Error creating hp instance for " << owner_pubkey;
@@ -231,6 +233,45 @@ namespace hp
             vacant_ports.pop_back();
         else
             last_assigned_ports = instance_ports;
+
+        return 0;
+    }
+
+    /**
+     * Removes the tenant's custom settings from a docker image name.
+     * Tenants can add settings to the image tag, each one starting with "--", for example
+     * "evernode/sashimono:hp.latest--peer--1234--env1--KEY-value". user-install.sh reads them from the full name,
+     * but docker can't use that name, so the settings are removed before "docker create".
+     * Only the tag is searched. A "--" in the registry or repository part is valid in a docker name and is kept.
+     * @param image Docker image name as given by the tenant.
+     * @param docker_image Image name without the settings.
+     * @return 0 on success. -1 if the result is not a usable image name.
+     */
+    int strip_image_settings(std::string_view image, std::string &docker_image)
+    {
+        // The tag starts after the last ':', but only if that ':' comes after the last '/'.
+        // A ':' before the last '/' is a registry port, for example "host:5000/image".
+        const size_t last_slash = image.rfind('/');
+        const size_t tag_colon = image.rfind(':');
+        const bool has_tag = tag_colon != std::string_view::npos && (last_slash == std::string_view::npos || tag_colon > last_slash);
+
+        docker_image = image;
+        if (has_tag)
+        {
+            const std::string_view tag = image.substr(tag_colon + 1);
+            const size_t settings_pos = tag.find("--");
+            if (settings_pos != std::string_view::npos)
+            {
+                // A tag that only holds settings ("image:--peer--1234") means "latest". user-install.sh pulls the same.
+                const std::string_view version = tag.substr(0, settings_pos);
+                docker_image = std::string(image.substr(0, tag_colon + 1));
+                docker_image.append(version.empty() ? std::string_view("latest") : version);
+            }
+        }
+
+        // An empty name, or one starting with '-' (docker would read it as an option) or ':', can't be used.
+        if (docker_image.empty() || docker_image.front() == '-' || docker_image.front() == ':')
+            return -1;
 
         return 0;
     }

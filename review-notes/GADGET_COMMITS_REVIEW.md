@@ -120,12 +120,12 @@ Testing did not show problems because most of the risky code only runs in specia
 | L3 | Open-file limit change may lower limits on big hosts | 🔵 Low | Behaviour change | Likely | Easy | Open |
 | L4 | Dead code, unused variables, debug leftovers | 🔵 Low | Code quality | Confirmed | Easy | Open |
 | L5 | Copy-paste errors and typos in messages | 🔵 Low | Code quality | Confirmed | Easy | ✅ Fixed |
-| L6 | Repeated code blocks | 🔵 Low | Code quality | Confirmed | Easy | Open |
+| L6 | Repeated code blocks | 🔵 Low | Code quality | Confirmed | Easy | ✅ Fixed |
 | L7 | Scripts generated through 3 to 4 levels of escaping | 🔵 Low | Maintainability | Confirmed | Medium | Open |
 | L8 | Weak error handling patterns | 🔵 Low | Code quality | Confirmed | Easy | Open |
 | L9 | Hard-coded paths, URLs and DNS servers | 🔵 Low | Standards | Confirmed | Easy | Open |
 | L10 | Unquoted variables and other shell style issues | 🔵 Low | Standards | Confirmed | Easy | Open |
-| L11 | C++ `--` stripping is undocumented and loose | 🔵 Low | Code quality | Confirmed | Easy | Open |
+| L11 | C++ `--` stripping is undocumented and loose | 🔵 Low | Code quality | Confirmed | Easy | ✅ Fixed |
 | L12 | Process: huge mixed commits, no build check, no tests | 🔵 Low | Process | Confirmed | Easy | Open |
 
 ---
@@ -433,7 +433,7 @@ Testing did not show problems because most of the risky code only runs in specia
 - Misleading log text: "File hash matches docker hub, AND the Rate limit result is above 60", printed when either condition is false.
 - **Easy.**
 
-#### L6. Repeated code blocks
+#### L6. Repeated code blocks, ✅ FIXED
 
 - 14 nearly identical `if` blocks parse the settings. One `case` statement would do.
 - The 4 env parsing blocks are copies of each other.
@@ -469,7 +469,7 @@ Testing did not show problems because most of the risky code only runs in specia
 - There was no `shellcheck` run, and none is set up in the repo.
 - **Fix:** Add `shellcheck` to CI and fix the warnings. **Easy.**
 
-#### L11. C++ `--` stripping is undocumented and loose
+#### L11. C++ `--` stripping is undocumented and loose, ✅ FIXED
 
 - [hp_manager.cpp:205-208](src/hp_manager.cpp#L205-L208) cuts the image name at the **first `--` anywhere**, including in the repository part.
 - There is no comment explaining the `--` convention, and no check for an empty result (for example an image name that starts with `--`).
@@ -578,3 +578,34 @@ A fuller explanation of this whole area, written for someone with no quota/fstab
 - **Verified:** `bash -n dependencies/user-install.sh` passes. A `grep` for the old typos finds nothing. `git diff` shows only text inside `echo` and comment lines.
 
 Explanation: `changes/2. copy-paste-errors-and-typos-in-messages-explained.md`.
+
+### 2026-10-12: L6 and L11 fixed (repeated code blocks, image name stripping)
+
+- **Findings closed:** L6, L11.
+- **Files changed:** `dependencies/user-install.sh`, `src/hp_manager.cpp`, `src/hp_manager.hpp`.
+- **What changed (L6, `user-install.sh`):**
+  - The 14 `if` blocks that parse the image-tag settings are now one `case` statement. The port settings share one branch, and `env1` to `env4` share one branch. Both use `printf -v`, and only with names that matched a `case` pattern.
+  - The quota cron strings (`quota_crontab_*`) are defined once, before the custom / no-custom branch, instead of once in each branch.
+  - The certificate download, unzip and rename block, which appeared twice in the generated `domain_ssl_update.sh`, is now one function, `download_npm_cert()`, in that generated script. Each caller keeps its own failure handling, because the two were different on purpose.
+  - Starting the watcher service and writing its cleanup lines is done once, after the branch. Each branch now only sets `watcher_service` (`docker_recreate.service` or `docker_vars.service`).
+- **What changed (L11, `hp_manager.cpp`):**
+  - The inline "cut at the first `--`" code is replaced by `strip_image_settings()`, which has a doc comment explaining the `--` convention.
+  - It only strips inside the tag: after the last `:`, and only when that `:` is after the last `/`, so registry ports are left alone. A tag that holds only settings becomes `latest`, which matches what `user-install.sh` pulls.
+  - It rejects a result that is empty or starts with `-` or `:`.
+  - `create_new_instance()` now calls it **before** `install_user()`. An invalid image therefore fails straight away with the existing, previously unused `docker_image_invalid` error, instead of failing at `docker create` after a Linux user was already created. `install_user()` still gets the full name, because `user-install.sh` needs the settings.
+- **Why:**
+  - L6: every copy had to be fixed separately, and copies drift. The `found env1` bug fixed in L5 came from exactly this.
+  - L11: the old code cut `my--org/my--img:v2` down to `my`, a different image. It turned `img:--peer--1234` into the invalid name `img:`, and an image starting with `--` into an empty name.
+- **Not changed:**
+  - L6 kept the output identical. Behaviour fixes for this same code (M9 env values, M10 cron schedule, and the cron job being added without NPMplus in the custom branch) are left for those findings.
+  - The shell side still splits the image name at the **first** `:`, so registries with a port are still mishandled there (M8).
+  - The now-unneeded `docker tag ... ${docker_image}` line is left for L4.
+- **Verified:**
+  - The old and new settings parsers gave identical variables for 16 image names.
+  - The old and new service sections, run with stubbed `sudo`, `chown` and `jq` for both branches and NPMplus on/off, produced byte-identical generated files, `systemctl` calls and cleanup lines.
+  - The rendered `domain_ssl_update.sh` passes `bash -n`, and its diff shows only the new function and its two calls. The function was tested with stubbed `curl`/`unzip` on the success and failure paths.
+  - `hp_manager.cpp` compiles with `g++ -std=c++17 -fsyntax-only`, and `strip_image_settings()` passes 12 unit cases.
+  - `bash -n dependencies/user-install.sh` passes.
+  - **Not yet done:** a full `make` build, and creating a real instance on a test host.
+
+Explanation: `changes/3. repeated-code-blocks-and-image-name-stripping-explained.md`.
