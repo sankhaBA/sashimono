@@ -116,7 +116,7 @@ Testing did not show problems because most of the risky code only runs in specia
 | M12 | `dns_evernode.sh` gives up after the first nameserver | 🟡 Medium | Bug | Confirmed | Easy | Open |
 | M13 | NPMplus API called with TLS checks off (`curl -k`) | 🟡 Medium | Security | Confirmed | Easy | Open |
 | L1 | Missing dependencies and undocumented config keys | 🔵 Low | Standards | Confirmed | Easy | Open |
-| L2 | Leaks on rollback and uninstall | 🔵 Low | Reliability | Confirmed | Easy | Open |
+| L2 | Leaks on rollback and uninstall | 🔵 Low | Reliability | Confirmed | Easy | ✅ Fixed |
 | L3 | Open-file limit change may lower limits on big hosts | 🔵 Low | Behaviour change | Likely | Easy | Open |
 | L4 | Dead code, unused variables, debug leftovers | 🔵 Low | Code quality | Confirmed | Easy | Open |
 | L5 | Copy-paste errors and typos in messages | 🔵 Low | Code quality | Confirmed | Easy | ✅ Fixed |
@@ -401,7 +401,7 @@ Testing did not show problems because most of the risky code only runs in specia
 - They come from outside tooling, so the feature is hidden and untested on standard installs.
 - **Fix:** Add the packages to `prereq.sh`, and document the config keys (or add them to the installer). **Easy.**
 
-#### L2. Leaks on rollback and uninstall
+#### L2. Leaks on rollback and uninstall, ✅ FIXED
 
 - The nft table is created at line 446, but its cleanup commands are only registered at the end (lines 1042 and 1092). A rollback in between (for example `DOCKER_PULL`) leaves the table behind.
 - The cleanup script tries to stop user systemd services after `user-uninstall.sh` has already killed the user's processes, so those lines do nothing.
@@ -609,3 +609,36 @@ Explanation: `changes/2. copy-paste-errors-and-typos-in-messages-explained.md`.
   - **Not yet done:** a full `make` build, and creating a real instance on a test host.
 
 Explanation: `changes/3. repeated-code-blocks-and-image-name-stripping-explained.md`.
+
+### 2026-10-12: L2 fixed (leaks on rollback and uninstall)
+
+- **Findings closed:** L2.
+- **Files changed:** `dependencies/user-install.sh`, `dependencies/user-uninstall.sh`, `installer/sashimono-uninstall.sh`.
+- **What changed:**
+  - **Rollback leak.** `user-install.sh` now writes the nft table's cleanup lines (delete the `docker_filter_<uid>` table, re-save `/etc/nftables.conf`) right after creating the table, instead of at the end of the script. A rollback at any of the six later rollback points (`NO_DOCKERSVC`, `NO_DOCKERD`, `DOCKER_PULL`) now removes the table.
+  - **Watcher service stop.** The `docker_recreate.service` / `docker_vars.service` stop and disable lines were removed from the cleanup script, because it runs after `user-uninstall.sh` has already killed the user's systemd, so they never worked. `user-uninstall.sh` now stops and disables whichever of the two exists, next to the hpfs services, while the user's systemd is still running.
+  - **Full uninstall.** `sashimono-uninstall.sh` (full uninstall only, not upgrade, after all instances are removed) now:
+    - deletes any `docker_filter_*` tables left in the live ruleset (`ip` and `ip6`);
+    - removes `docker_filter_*` table blocks from `/etc/nftables.conf`, after saving `/etc/nftables.conf.sashimono-bak`, and keeps every other table;
+    - removes `/root/.acme.sh/dns_evernode.sh`, and the `/root/.acme.sh` folder only if it is then empty;
+    - removes `/root/domain_ssl_update.log`.
+- **Why:**
+  - Cleanup must be registered before the next point where the install can roll back. The IPv6 code in the same script already did this.
+  - Steps that need the user's systemd must run before `user-uninstall.sh` kills the user's processes. The hpfs services were already handled that way.
+  - The full uninstaller had never been updated for the host-level files Gadget's features create.
+- **Not changed:**
+  - Cleanup scripts of instances that already exist still contain the old, harmless no-op stop/disable lines. Their watcher services are now stopped by the new `user-uninstall.sh` step.
+  - `nft list ruleset > /etc/nftables.conf` still overwrites the operator's whole file. That's M3.
+  - `systemctl enable nftables` is not undone at uninstall, because the operator may rely on it. Decide this with M3.
+  - The `/root/.acme.sh` copy itself is still made at install (H5, L4).
+- **Noticed while fixing:** `user-install.sh` still runs `apt-get install nftables` during instance creation (around line 348). That's part of H6's original finding, but the H6 fix above only removed the kernel package install, so H6 is not fully fixed.
+- **Verified:**
+  - Old vs new firewall section with stubbed commands: at rollback time, the old cleanup script had 0 lines and the new one has the nft delete and save lines.
+  - The full-uninstall block was run on a sample `nftables.conf` holding a ufw table, an operator table and 3 `docker_filter_*` tables. Only the Sashimono tables were removed (live and in the file), and a backup was written.
+  - `/root/.acme.sh` was kept when it held another file and removed when it held only our plugin.
+  - The watcher stop acted only on the unit that exists (tested for each of the two, and for neither).
+  - The agent and `sashimono-uninstall.sh` only read the last output line of `user-uninstall.sh`, so the new log line is safe.
+  - `bash -n` passes for all three scripts.
+  - **Not yet done:** a real rollback, a lease removal and a full uninstall on a test host.
+
+Explanation: `changes/4. leaks-on-rollback-and-uninstall-explained.md`.

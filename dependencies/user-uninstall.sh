@@ -57,6 +57,14 @@ sudo -u "$user" XDG_RUNTIME_DIR="$user_runtime_dir" systemctl --user stop "$ledg
 sudo -u "$user" XDG_RUNTIME_DIR="$user_runtime_dir" systemctl --user disable "$contract_fs_service"
 sudo -u "$user" XDG_RUNTIME_DIR="$user_runtime_dir" systemctl --user disable "$ledger_fs_service"
 
+for watcher_service in docker_recreate.service docker_vars.service; do
+    if [ -f "$user_dir/.config/systemd/user/$watcher_service" ]; then
+        echo "Stopping and disabling $watcher_service."
+        sudo -u "$user" XDG_RUNTIME_DIR="$user_runtime_dir" systemctl --user stop "$watcher_service"
+        sudo -u "$user" XDG_RUNTIME_DIR="$user_runtime_dir" systemctl --user disable "$watcher_service"
+    fi
+done
+
 # Uninstall rootless dockerd.
 echo "Uninstalling rootless dockerd."
 sudo -H -u "$user" PATH="$docker_bin":"$PATH" XDG_RUNTIME_DIR="$user_runtime_dir" "$docker_bin"/dockerd-rootless-setuptool.sh uninstall

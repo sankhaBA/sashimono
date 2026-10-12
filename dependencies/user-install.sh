@@ -356,6 +356,8 @@ if [[ "$local_ip" != "$public_hostname_ip" ]]; then
     nft delete table ip docker_filter_$user_id 2>/dev/null
     nft add table ip docker_filter_$user_id
     nft add chain ip docker_filter_$user_id OUTPUT '{ type filter hook output priority 0 ; policy accept ; }'
+    echo "sudo nft flush table ip docker_filter_$user_id 2>/dev/null && sudo nft delete table ip docker_filter_$user_id 2>/dev/null && echo \"Cleaned up docker_filter_$user_id table\"" >>$cleanup_script
+    echo "nft list ruleset > /etc/nftables.conf" >>$cleanup_script
 
     echo "detected local ip to $local_ip, allowing."
     nft add rule ip docker_filter_$user_id OUTPUT meta skuid $user_id ip daddr $local_ip accept
@@ -981,11 +983,7 @@ fi
 sudo -u "$user" XDG_RUNTIME_DIR="$user_runtime_dir" systemctl --user daemon-reload
 sudo -u "$user" XDG_RUNTIME_DIR="$user_runtime_dir" systemctl --user enable "$watcher_service"
 sudo -u "$user" XDG_RUNTIME_DIR="$user_runtime_dir" systemctl --user start "$watcher_service"
-echo "sudo -u \"$user\" XDG_RUNTIME_DIR=\"$user_runtime_dir\" systemctl --user stop $watcher_service" >>$cleanup_script
-echo "sudo -u \"$user\" XDG_RUNTIME_DIR=\"$user_runtime_dir\" systemctl --user disable $watcher_service" >>$cleanup_script
 echo "crontab -u $user -r" >>$cleanup_script
-echo "sudo nft flush table ip docker_filter_$user_id 2>/dev/null && sudo nft delete table ip docker_filter_$user_id 2>/dev/null && echo \"Cleaned up docker_filter_$user_id table\"" >>$cleanup_script
-echo "nft list ruleset > /etc/nftables.conf" >>$cleanup_script
 echo "cat $user_dir/.docker/domain_ssl_update.log >> /root/domain_ssl_update.log" >>$cleanup_script
 chown -R $user:$user $cleanup_script
 

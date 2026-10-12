@@ -251,6 +251,21 @@ if [ "$UPGRADE" == "0" ]; then
         p2=$(echo $ports | cut -d ',' -f 2 | cut -d '/' -f 1)
         ufw delete allow "$p1","$p2"/tcp
     done
+
+    if command -v nft &>/dev/null; then
+        nft list tables 2>/dev/null | grep -E '^table ip6? docker_filter_[0-9]+$' | while read -r _ family table; do
+            echo "Removing leftover nft table $family $table..."
+            nft delete table "$family" "$table"
+        done
+    fi
+    if [ -f /etc/nftables.conf ] && grep -qE '^table ip6? docker_filter_[0-9]+ \{$' /etc/nftables.conf; then
+        echo "Removing Sashimono tables from /etc/nftables.conf (backup saved as /etc/nftables.conf.sashimono-bak)..."
+        sed -i.sashimono-bak -E '/^table ip6? docker_filter_[0-9]+ \{$/,/^\}$/d' /etc/nftables.conf
+    fi
+    # The folder is removed only if nothing else is in it.
+    rm -f /root/.acme.sh/dns_evernode.sh
+    rmdir --ignore-fail-on-non-empty /root/.acme.sh 2>/dev/null
+    rm -f /root/domain_ssl_update.log
 fi
 
 echo "Removing Sashimono cgroup creation service..."
