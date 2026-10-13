@@ -577,7 +577,7 @@ A fuller explanation of this whole area, written for someone with no quota/fstab
   - Escaping inside the heredoc (`\$contract_publickey`) and the quoted cron string was left exactly as it was. Only the misspelled words changed.
 - **Verified:** `bash -n dependencies/user-install.sh` passes. A `grep` for the old typos finds nothing. `git diff` shows only text inside `echo` and comment lines.
 
-Explanation: `changes/2. copy-paste-errors-and-typos-in-messages-explained.md`.
+Explanation: `changes/[L5] Copy-paste errors and typos in messages explained.md`.
 
 ### 2026-10-12: L6 and L11 fixed (repeated code blocks, image name stripping)
 
@@ -608,7 +608,7 @@ Explanation: `changes/2. copy-paste-errors-and-typos-in-messages-explained.md`.
   - `bash -n dependencies/user-install.sh` passes.
   - **Not yet done:** a full `make` build, and creating a real instance on a test host.
 
-Explanation: `changes/3. repeated-code-blocks-and-image-name-stripping-explained.md`.
+Explanation: `changes/[L6, L11] Repeated code blocks and image name stripping explained.md`.
 
 ### 2026-10-12: L2 fixed (leaks on rollback and uninstall)
 
@@ -641,4 +641,4 @@ Explanation: `changes/3. repeated-code-blocks-and-image-name-stripping-explained
   - `bash -n` passes for all three scripts.
   - **Not yet done:** a real rollback, a lease removal and a full uninstall on a test host.
 
-Explanation: `changes/4. leaks-on-rollback-and-uninstall-explained.md`.
+Explanation: `changes/[L2] Leaks on rollback and uninstall explained.md`.
