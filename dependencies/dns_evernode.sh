@@ -9,7 +9,7 @@ dns_evernode_add() {
   txtvalue="$2"                   # The TXT record value to add
   apicall_success="false"         # variable used to keep tabs if API call was a success
   api_subdomain="https://dnsapi." # subdomain that API is setup on the evernode
-  nameserver_override="@8.8.8.8"  # a nameserver to use for all the "digs", so as not to use the "host default one"
+  nameserver_override="@${EVERNODE_DNS_RESOLVER:-8.8.8.8}"  # nameserver for all the "digs", not the host default one. Set by user-install.sh (proxy.dns_resolver).
 
   _info "### Evernode DNS v.96 script running, this will collect all name servers that are held within $full_domain"
   _info "### then it will poll each name server to add the TXT record, (substituting subdomain for ${api_subdomain}) as long as one works the script will continue."
@@ -19,7 +19,7 @@ dns_evernode_add() {
   # make sure we have zone correct
   dots=$(echo "$parent_domain" | tr -cd '.' | wc -c)
   if [ "$dots" -gt 1 ]; then
-    zone_parent_domain=$(dig +trace +time=1 +tries=1 "$parent_domain" $nameserver_override | 
+    zone_parent_domain=$(dig +trace +time=1 +tries=1 "$parent_domain" "$nameserver_override" | 
         grep -v "^;" | 
         sed -n 's/^\([^[:space:]]\+\)[[:space:]]\+[0-9]\+[[:space:]]\+IN[[:space:]]\+NS[[:space:]].*/\1/p' | 
         tail -n1)
@@ -107,7 +107,7 @@ dns_evernode_rm() {
   txtvalue="$2"                   # The TXT record value to add
   apicall_success="false"         # variable used to keep tabs if API call was a success
   api_subdomain="https://dnsapi." # subdomain that API is setup on the evernode
-  nameserver_override="@8.8.8.8"  # a nameserver to use for all the "digs", so as not to use the "host default one"
+  nameserver_override="@${EVERNODE_DNS_RESOLVER:-8.8.8.8}"  # nameserver for all the "digs", not the host default one. Set by user-install.sh (proxy.dns_resolver).
 
   _info "### Evernode DNS v.96 script running, this will collect all name servers that are held within $full_domain"
   _info "### then it will poll each name server to now remove the TXT record, (substituting subdomain for ${api_subdomain})."
@@ -117,7 +117,7 @@ dns_evernode_rm() {
   # make sure we have zone correct
   dots=$(echo "$parent_domain" | tr -cd '.' | wc -c)
   if [ "$dots" -gt 1 ]; then
-    zone_parent_domain=$(dig +trace +time=1 +tries=1 "$parent_domain" $nameserver_override | 
+    zone_parent_domain=$(dig +trace +time=1 +tries=1 "$parent_domain" "$nameserver_override" | 
         grep -v "^;" | 
         sed -n 's/^\([^[:space:]]\+\)[[:space:]]\+[0-9]\+[[:space:]]\+IN[[:space:]]\+NS[[:space:]].*/\1/p' | 
         tail -n1)
