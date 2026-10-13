@@ -190,83 +190,44 @@ for ((i = 1; i < ${#image_array[@]}; i += 2)); do
     image_array_name="${image_array[i]}"
     image_array_value="${image_array[i + 1]}"
     echo "found additional setting, name: \"$image_array_name\"    value: \"$image_array_value\""
-    if [[ -n "$image_array_name" ]]; then
-        if [[ "$image_array_name" == "domain" ]]; then
+    case "$image_array_name" in
+        domain)
             custom_docker_settings="true"
             custom_docker_domain=$image_array_value
-        fi
-        if [[ "$image_array_name" == "subdomain" ]]; then
+            ;;
+        subdomain)
             custom_docker_settings="true"
             custom_docker_subdomain=$image_array_value
-        fi
-        if [[ "$image_array_name" == "ssl" ]]; then
+            ;;
+        ssl)
             custom_docker_settings="true"
-            if [[ "$image_array_value" == "false" ]];then custom_docker_domain_ssl="false"; fi
-        fi
-        if [[ "$image_array_name" == "peer" ]]; then
+            if [[ "$image_array_value" == "false" ]]; then custom_docker_domain_ssl="false"; fi
+            ;;
+        peer | user | gptcp1 | gpudp1 | gptcp2 | gpudp2)
+            # Sets internal_peer_port, internal_user_port, internal_gptcp1_port, etc.
             custom_docker_settings="true"
-            internal_peer_port=$image_array_value
-        fi
-        if [[ "$image_array_name" == "user" ]]; then
-            custom_docker_settings="true"
-            internal_user_port=$image_array_value
-        fi
-        if [[ "$image_array_name" == "gptcp1" ]]; then
-            custom_docker_settings="true"
-            internal_gptcp1_port=$image_array_value
-        fi
-        if [[ "$image_array_name" == "gpudp1" ]]; then
-            custom_docker_settings="true"
-            internal_gpudp1_port=$image_array_value
-        fi
-        if [[ "$image_array_name" == "gptcp2" ]]; then
-            custom_docker_settings="true"
-            internal_gptcp2_port=$image_array_value
-        fi
-        if [[ "$image_array_name" == "gpudp2" ]]; then
-            custom_docker_settings="true"
-            internal_gpudp2_port=$image_array_value
-        fi
-        if [[ "$image_array_name" == "contract" ]]; then
-            if [ "$image_array_value" == "true" ]; then
+            printf -v "internal_${image_array_name}_port" '%s' "$image_array_value"
+            ;;
+        contract)
+            if [[ "$image_array_value" == "true" ]]; then
                 custom_docker_settings="true"
                 internal_run_contract="run /contract"
                 echo "found contract command, enabling \"run /contract\""
             fi
-        fi
-        if [[ "$image_array_name" == "env1" ]]; then
+            ;;
+        env[1-4])
+            # Value format is KEY-value. "__" becomes a space and ".." becomes "$".
+            # Sets internal_env<N>_key and internal_env<N>_value.
             custom_docker_settings="true"
-            internal_env1_key=$(echo "$image_array_value" | cut -d'-' -f1)
-            internal_env1_value=${image_array_value#*-}
-            internal_env1_value=${internal_env1_value//__/ }
-            internal_env1_value=${internal_env1_value//../$}
-            echo "found env1, key>$internal_env1_key value>$internal_env1_value"
-        fi
-        if [[ "$image_array_name" == "env2" ]]; then
-            custom_docker_settings="true"
-            internal_env2_key=$(echo "$image_array_value" | cut -d'-' -f1)
-            internal_env2_value=${image_array_value#*-}
-            internal_env2_value=${internal_env2_value//__/ }
-            internal_env2_value=${internal_env2_value//../$}
-            echo "found env1, key>$internal_env2_key value>$internal_env2_value"
-        fi
-        if [[ "$image_array_name" == "env3" ]]; then
-            custom_docker_settings="true"
-            internal_env3_key=$(echo "$image_array_value" | cut -d'-' -f1)
-            internal_env3_value=${image_array_value#*-}
-            internal_env3_value=${internal_env3_value//__/ }
-            internal_env3_value=${internal_env3_value//../$}
-            echo "found env1, key>$internal_env3_key value>$internal_env3_value"
-        fi
-        if [[ "$image_array_name" == "env4" ]]; then
-            custom_docker_settings="true"
-            internal_env4_key=$(echo "$image_array_value" | cut -d'-' -f1)
-            internal_env4_value=${image_array_value#*-}
-            internal_env4_value=${internal_env4_value//__/ }
-            internal_env4_value=${internal_env4_value//../$}
-            echo "found env1, key>$internal_env4_key value>$internal_env4_value"
-        fi
-    fi
+            env_key=$(echo "$image_array_value" | cut -d'-' -f1)
+            env_value=${image_array_value#*-}
+            env_value=${env_value//__/ }
+            env_value=${env_value//../$}
+            printf -v "internal_${image_array_name}_key" '%s' "$env_key"
+            printf -v "internal_${image_array_name}_value" '%s' "$env_value"
+            echo "found $image_array_name, key>$env_key value>$env_value"
+            ;;
+    esac
 done
 
 # adjust docker_pull_image, and set a "default" custom_docker_image, only if custom settings have been detected
@@ -352,7 +313,7 @@ for ((i = 0; i < $gp_tcp_port_count; i++)); do
     fi
 done
 
-# Creating AppArmor Profile for unpriviledged user on Ubuntu 24.04
+# Creating AppArmor Profile for unprivileged user on Ubuntu 24.04
 if [ "$osversion" == "24.04" ]; then
     filename=$(echo /home/$user/bin/rootlesskit | sed -e s@^/@@ -e s@/@.@g)
     cat <<EOF > /etc/apparmor.d/$filename
@@ -395,6 +356,8 @@ if [[ "$local_ip" != "$public_hostname_ip" ]]; then
     nft delete table ip docker_filter_$user_id 2>/dev/null
     nft add table ip docker_filter_$user_id
     nft add chain ip docker_filter_$user_id OUTPUT '{ type filter hook output priority 0 ; policy accept ; }'
+    echo "sudo nft flush table ip docker_filter_$user_id 2>/dev/null && sudo nft delete table ip docker_filter_$user_id 2>/dev/null && echo \"Cleaned up docker_filter_$user_id table\"" >>$cleanup_script
+    echo "nft list ruleset > /etc/nftables.conf" >>$cleanup_script
 
     echo "detected local ip to $local_ip, allowing."
     nft add rule ip docker_filter_$user_id OUTPUT meta skuid $user_id ip daddr $local_ip accept
@@ -532,7 +495,7 @@ else
         echo "$IMAGE_DIGEST" > ${img_local_path}/image_digest
         echo "docker image pulled, and saved as a tarball at $img_local_tar_path. and refreshed image digest record"
     else
-        echo "File hash matches docker hub, AND the Rate limit result is above 60 (=${RATE_LIMIT_REMAINING})"
+        echo "Using cached image (digest unchanged, or rate limit too low/unknown to re-pull: remaining=${RATE_LIMIT_REMAINING})"
         echo "local hash = $(cat ${img_local_path}/image_digest)"
         echo "docker hash = ${IMAGE_DIGEST}"
         echo "skipping image pull."
@@ -615,6 +578,27 @@ instance_slot=${user_port: -1}
 web_port="$gp_tcp_port_start"
 EVERNODE_HOSTNAME="$EVERNODE_HOSTNAME"
 
+# Downloads certificate \$NPM_CERT_ID from NPMplus into the contract's tls folder, and sets NPM_CERT_ID_STRING to use it.
+# Returns 1 if the download or unzip fails, so the caller can fall back to no SSL.
+download_npm_cert() {
+    mkdir -p $user_dir/$contract_dir/tls
+    if { 
+        curl -k --output $user_dir/$contract_dir/tls/tls_files.zip -m 10 -X GET -H "Content-Type: application/json; charset=UTF-8" -H "Authorization: Bearer \$NPM_TOKEN" \$NPM_URL/api/nginx/certificates/\$NPM_CERT_ID/download &&
+        unzip $user_dir/$contract_dir/tls/tls_files.zip -d $user_dir/$contract_dir/tls &&
+        echo "downloaded certificate ID \$NPM_CERT_ID for evernode"
+    }; then
+        for tls_file in $user_dir/$contract_dir/tls/*.pem; do
+            tls_newname=\$(echo \$(basename \$tls_file) | sed 's/[0-9]*//g')
+            mv "\$tls_file" "$user_dir/$contract_dir/tls/\$tls_newname"
+        done
+        chown -R $user:$user $user_dir/$contract_dir/tls
+        if [[ "\$NPM_CERT_ID_WILD" == "false" ]]; then echo "curl -k -m 100 -X DELETE -H \"Content-Type: application/json; charset=UTF-8\" -H \"Authorization: Bearer \$NPM_TOKEN\" \$NPM_URL/api/nginx/certificates/\$NPM_CERT_ID" >>$cleanup_script; fi
+        NPM_CERT_ID_STRING=",\"certificate_id\":\$NPM_CERT_ID,\"ssl_forced\":1"
+    else
+        return 1
+    fi
+}
+
 # 1st check for blacklisted domain, and null if present.
 if [[ -n "\$custom_docker_domain" ]]; then
     blacklist_domains=\$(jq -r ".proxy.blacklist[] | select( . != null )" "$MBXRPL_CONFIG")
@@ -632,10 +616,10 @@ if [[ -n "\$custom_docker_domain" ]]; then
     contract_publickey=\$(jq -r ".contract.bin_args | select( . != null )" "$user_dir/$contract_dir/cfg/hp.cfg") || true
     domain_txtrecord=\$(dig +short +time=10 +tries=3 TXT "\$custom_docker_domain" @1.1.1.1)
     if echo "\$domain_txtrecord" | grep -q "\$contract_publickey"; then
-        echo "contract pubic key, '\$contract_publickey'"
+        echo "contract public key, '\$contract_publickey'"
         echo "domain authorized, as found in the TXT records of \$custom_docker_domain, :\$domain_txtrecord"
     else
-        echo "contract pubic key, '\$contract_publickey'"
+        echo "contract public key, '\$contract_publickey'"
         echo "domain NOT authorized as NOT found in the TXT records of \$custom_docker_domain, :\$domain_txtrecord"
         echo "not adding domain !"
         tls_type="failed"
@@ -749,20 +733,7 @@ if [[ "\$tls_type" == "NPMplus" ]]; then
                         NPM_CERT_ID_STRING=",\"certificate_id\":0,\"ssl_forced\":0"
                     else
                         echo "certificate added, for host domain \$custom_docker_domain, with ID:\$NPM_CERT_ID  WILDCARD:\$NPM_CERT_ID_WILD"
-                        mkdir -p $user_dir/$contract_dir/tls
-                        if { 
-                            curl -k --output $user_dir/$contract_dir/tls/tls_files.zip -m 10 -X GET -H "Content-Type: application/json; charset=UTF-8" -H "Authorization: Bearer \$NPM_TOKEN" \$NPM_URL/api/nginx/certificates/\$NPM_CERT_ID/download &&
-                            unzip $user_dir/$contract_dir/tls/tls_files.zip -d $user_dir/$contract_dir/tls &&
-                            echo "downloaded certificate ID \$NPM_CERT_ID for evernode"
-                        }; then
-                            for tls_file in $user_dir/$contract_dir/tls/*.pem; do
-                                tls_newname=\$(echo \$(basename \$tls_file) | sed 's/[0-9]*//g')
-                                mv "\$tls_file" "$user_dir/$contract_dir/tls/\$tls_newname"
-                            done
-                            chown -R $user:$user $user_dir/$contract_dir/tls
-                            if [[ "\$NPM_CERT_ID_WILD" == "false" ]]; then echo "curl -k -m 100 -X DELETE -H \"Content-Type: application/json; charset=UTF-8\" -H \"Authorization: Bearer \$NPM_TOKEN\" \$NPM_URL/api/nginx/certificates/\$NPM_CERT_ID" >>$cleanup_script; fi
-                            NPM_CERT_ID_STRING=",\"certificate_id\":\$NPM_CERT_ID,\"ssl_forced\":1"
-                        else
+                        if ! download_npm_cert; then
                             echo "failed to download and unzip certificate ID \$NPM_CERT_ID, setting up domain with no SSL."
                             echo "flushing broken ssl certificate with ID \$NPM_CERT_ID from NPMplus."
                             curl -k -m 100 -X DELETE -H "Content-Type: application/json; charset=UTF-8" -H "Authorization: Bearer \$NPM_TOKEN" \$NPM_URL/api/nginx/certificates/\$NPM_CERT_ID
@@ -776,20 +747,7 @@ if [[ "\$tls_type" == "NPMplus" ]]; then
                 fi
             elif [ "\$NPM_CERT_PROVIDER" != "other" ]; then
                 echo "found existing certificate for host domain \$custom_docker_domain, with ID:\$NPM_CERT_ID   WILDCARD:\$NPM_CERT_ID_WILD"
-                mkdir -p $user_dir/$contract_dir/tls
-                if { 
-                    curl -k --output $user_dir/$contract_dir/tls/tls_files.zip -m 10 -X GET -H "Content-Type: application/json; charset=UTF-8" -H "Authorization: Bearer \$NPM_TOKEN" \$NPM_URL/api/nginx/certificates/\$NPM_CERT_ID/download &&
-                    unzip $user_dir/$contract_dir/tls/tls_files.zip -d $user_dir/$contract_dir/tls &&
-                    echo "downloaded certificate ID \$NPM_CERT_ID for evernode"
-                }; then
-                    for tls_file in $user_dir/$contract_dir/tls/*.pem; do
-                        tls_newname=\$(echo \$(basename \$tls_file) | sed 's/[0-9]*//g')
-                        mv "\$tls_file" "$user_dir/$contract_dir/tls/\$tls_newname"
-                    done
-                    chown -R $user:$user $user_dir/$contract_dir/tls
-                    if [[ "\$NPM_CERT_ID_WILD" == "false" ]]; then echo "curl -k -m 100 -X DELETE -H \"Content-Type: application/json; charset=UTF-8\" -H \"Authorization: Bearer \$NPM_TOKEN\" \$NPM_URL/api/nginx/certificates/\$NPM_CERT_ID" >>$cleanup_script; fi
-                    NPM_CERT_ID_STRING=",\"certificate_id\":\$NPM_CERT_ID,\"ssl_forced\":1"
-                else
+                if ! download_npm_cert; then
                     echo "failed to download and unzip certificate ID \$NPM_CERT_ID, setting up domain with no SSL."
                     NPM_CERT_ID_STRING=",\"certificate_id\":0,\"ssl_forced\":0"
                 fi
@@ -891,9 +849,15 @@ $internal_env3_key=$internal_env3_value
 $internal_env4_key=$internal_env4_value
 EOF
 
+# Cron job that writes the instance's current disk usage into env.vars every 5 minutes. Used by both watcher services below.
+quota_crontab_awk_cmd="awk ''\'NR==3 {print \\\\\$2}''\'"
+quota_crontab_sed_cmd='sed \\"s/^DISK_USED_BYTES=.*/DISK_USED_BYTES=\\$USED_BYTES/\\"'
+quota_crontab_entry='echo "*/5 * * * * USED_BYTES=\\$(quota -g '${user}' 2>/dev/null | '${quota_crontab_awk_cmd}' || echo \\"0\\") && '${quota_crontab_sed_cmd}' \\"'${user_dir}'/'${contract_dir}'/env.vars\\" > \\"'${user_dir}'/'${contract_dir}'/env.vars.tmp\\" && [ -s '${user_dir}'/'${contract_dir}'/env.vars.tmp ] && mv \\"'${user_dir}'/'${contract_dir}'/env.vars.tmp\\" \\"'${user_dir}'/'${contract_dir}'/env.vars\\"" | crontab -'
+
 # if there is any extra docker setting requested, build and setup re-create script and a service to start it.
 if [[ "$custom_docker_settings" == "true" ]]; then
     echo "user custom docker settings detected, building docker re-create script and service"
+    watcher_service="docker_recreate.service"
 
 cat > "$user_dir"/.docker/docker_recreate.sh <<EOF
 #!/bin/bash
@@ -947,9 +911,6 @@ ${docker_bin}/docker start \$CONTAINER_NAME
 EOF
 chmod +x "$user_dir"/.docker/docker_recreate.sh
 
-quota_crontab_awk_cmd="awk ''\'NR==3 {print \\\\\$2}''\'"
-quota_crontab_sed_cmd='sed \\"s/^DISK_USED_BYTES=.*/DISK_USED_BYTES=\\$USED_BYTES/\\"'
-quota_crontab_entry='echo "*/5 * * * * USED_BYTES=\\$(quota -g '${user}' 2>/dev/null | '${quota_crontab_awk_cmd}' || echo \\"0\\") && '${quota_crontab_sed_cmd}' \\"'${user_dir}'/'${contract_dir}'/env.vars\\" > \\"'${user_dir}'/'${contract_dir}'/env.vars.tmp\\" && [ -s '${user_dir}'/'${contract_dir}'/env.vars.tmp ] && mv \\"'${user_dir}'/'${contract_dir}'/env.vars.tmp\\" \\"'${user_dir}'/'${contract_dir}'/env.vars\\"" | crontab -'
 domain_ssl_update_1='(crontab -l 2>/dev/null; echo "0 0 */7 * * sleep \\$((RANDOM*3540/32768)) && /usr/bin/bash '${user_dir}'/.docker/domain_ssl_update.sh 2>&1 | tee -a '${user_dir}'/.docker/domain_ssl_update.log") | crontab -'
 domain_ssl_update_2='bash "'${user_dir}'/.docker/domain_ssl_update.sh" 2>&1 | tee -a '${user_dir}'/.docker/domain_ssl_update.log'
 
@@ -979,29 +940,15 @@ SuccessExitStatus=0 143
 WantedBy=default.target
 EOF
 
-
-sudo -u "$user" XDG_RUNTIME_DIR="$user_runtime_dir" systemctl --user daemon-reload
-sudo -u "$user" XDG_RUNTIME_DIR="$user_runtime_dir" systemctl --user enable docker_recreate.service
-sudo -u "$user" XDG_RUNTIME_DIR="$user_runtime_dir" systemctl --user start docker_recreate.service
-echo "sudo -u \"$user\" XDG_RUNTIME_DIR=\"$user_runtime_dir\" systemctl --user stop docker_recreate.service" >>$cleanup_script
-echo "sudo -u \"$user\" XDG_RUNTIME_DIR=\"$user_runtime_dir\" systemctl --user disable docker_recreate.service" >>$cleanup_script
-echo "crontab -u $user -r" >>$cleanup_script
-echo "sudo nft flush table ip docker_filter_$user_id 2>/dev/null && sudo nft delete table ip docker_filter_$user_id 2>/dev/null && echo \"Cleaned up docker_filter_$user_id table\"" >>$cleanup_script
-echo "nft list ruleset > /etc/nftables.conf" >>$cleanup_script
-echo "cat $user_dir/.docker/domain_ssl_update.log >> /root/domain_ssl_update.log" >>$cleanup_script
-chown -R $user:$user $cleanup_script
-
 else
     echo "no user custom docker settings detected, only adding env.vars file and quota system."
-    quota_crontab_awk_cmd="awk ''\'NR==3 {print \\\\\$2}''\'"
-    quota_crontab_sed_cmd='sed \\"s/^DISK_USED_BYTES=.*/DISK_USED_BYTES=\\$USED_BYTES/\\"'
-    quota_crontab_entry='echo "*/5 * * * * USED_BYTES=\\$(quota -g '${user}' 2>/dev/null | '${quota_crontab_awk_cmd}' || echo \\"0\\") && '${quota_crontab_sed_cmd}' \\"'${user_dir}'/'${contract_dir}'/env.vars\\" > \\"'${user_dir}'/'${contract_dir}'/env.vars.tmp\\" && [ -s '${user_dir}'/'${contract_dir}'/env.vars.tmp ] && mv \\"'${user_dir}'/'${contract_dir}'/env.vars.tmp\\" \\"'${user_dir}'/'${contract_dir}'/env.vars\\"" | crontab -'
-    echo "no custom port or other user settings found. setting up recreate service to copy .vars file and default domain-farwading/proxy-host"
+    watcher_service="docker_vars.service"
+    echo "no custom port or other user settings found. setting up recreate service to copy .vars file and default domain-forwarding/proxy-host"
     if [[ "$TLS_TYPE" == "NPMplus" ]] && [[ "$docker_pull_image" != *"reputation"* ]]; then
         domain_ssl_update_1='(crontab -l 2>/dev/null; echo "0 0 */7 * * sleep \\$((RANDOM*3540/32768)) && /usr/bin/bash '${user_dir}'/.docker/domain_ssl_update.sh 2>&1 | tee -a '${user_dir}'/.docker/domain_ssl_update.log") | crontab -'
         domain_ssl_update_2='bash "'${user_dir}'/.docker/domain_ssl_update.sh" 2>&1 | tee -a '${user_dir}'/.docker/domain_ssl_update.log'
     else
-        domain_ssl_update_1='echo "NPMplus NOT intalled on host,"'
+        domain_ssl_update_1='echo "NPMplus NOT installed on host,"'
         domain_ssl_update_2='echo "or reputation contract detected."'
     fi
 
@@ -1030,18 +977,15 @@ SuccessExitStatus=0 143
 WantedBy=default.target
 EOF
 
-    sudo -u "$user" XDG_RUNTIME_DIR="$user_runtime_dir" systemctl --user daemon-reload
-    sudo -u "$user" XDG_RUNTIME_DIR="$user_runtime_dir" systemctl --user enable docker_vars.service
-    sudo -u "$user" XDG_RUNTIME_DIR="$user_runtime_dir" systemctl --user start docker_vars.service
-    echo "sudo -u \"$user\" XDG_RUNTIME_DIR=\"$user_runtime_dir\" systemctl --user stop docker_vars.service" >>$cleanup_script
-    echo "sudo -u \"$user\" XDG_RUNTIME_DIR=\"$user_runtime_dir\" systemctl --user disable docker_vars.service" >>$cleanup_script
-    echo "crontab -u $user -r" >>$cleanup_script
-    echo "sudo nft flush table ip docker_filter_$user_id 2>/dev/null && sudo nft delete table ip docker_filter_$user_id 2>/dev/null && echo \"Cleaned up docker_filter_$user_id table\"" >>$cleanup_script
-    echo "nft list ruleset > /etc/nftables.conf" >>$cleanup_script
-    echo "cat $user_dir/.docker/domain_ssl_update.log >> /root/domain_ssl_update.log" >>$cleanup_script
-    chown -R $user:$user $cleanup_script
-
 fi
+
+# Start the watcher service, and register its cleanup for uninstall.
+sudo -u "$user" XDG_RUNTIME_DIR="$user_runtime_dir" systemctl --user daemon-reload
+sudo -u "$user" XDG_RUNTIME_DIR="$user_runtime_dir" systemctl --user enable "$watcher_service"
+sudo -u "$user" XDG_RUNTIME_DIR="$user_runtime_dir" systemctl --user start "$watcher_service"
+echo "crontab -u $user -r" >>$cleanup_script
+echo "cat $user_dir/.docker/domain_ssl_update.log >> /root/domain_ssl_update.log" >>$cleanup_script
+chown -R $user:$user $cleanup_script
 
 # In the Sashimono configuration, CPU time is 1000000us Sashimono is given max_cpu_us out of it.
 # Instance allocation is multiplied by number of cores to determined the number of cores per instance and devided by 10 since cfs_period_us is set to 100000us
@@ -1058,7 +1002,7 @@ cpu_quota=$(expr $(expr $cores \* $cpu \* 100 \/ $cpu_period))
 swap_only_mem=$((swapmem - memory))
 [ $swap_only_mem -lt 0 ] && swap_only_mem=0
 
-# Resource limiting for the unpriviledged user
+# Resource limiting for the unprivileged user
 # This is the resource limiting mechanism with cgroup v2. With cgroup v1, the cgroup rules engine moves
 # user processes into the cgroups created by user-cgcreate.sh.
 mkdir -p /etc/systemd/system/user-$user_id.slice.d
