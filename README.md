@@ -29,6 +29,12 @@ Both cgroup v1 and cgroup v2 hosts are supported. The cgroup version is detected
 
 In both cases the `sashimono-cgcreate` service re-applies the limits at system startup.
 
+### Contract instance network restrictions (nftables)
+
+`user-firewall.sh` applies a per-instance nftables table (`inet docker_filter_<uid>`) that blocks the instance's traffic to the host, the LAN, private networks, cloud metadata and multicast (IPv4 and IPv6). Replies to inbound connections, DNS, the instance and web ports on the host's own addresses and the NPMplus API are allowed.
+
+The rules are applied by `user-install.sh` when an instance is created, and the `sashimono-firewall` service re-applies them for all instances at system startup (and whenever `nftables.service` is restarted or reloaded). Nothing is written to `/etc/nftables.conf`.
+
 ## Build Sashimono Agent
 
 1. Run `git submodule update --init --recursive` to clone the bootstrap contract for first time.

@@ -88,6 +88,7 @@
     export REPUTATIOND_CONFIG="$REPUTATIOND_DATA/reputationd.cfg"
     export SASHIMONO_SERVICE="sashimono-agent"
     export CGCREATE_SERVICE="sashimono-cgcreate"
+    export FIREWALL_SERVICE="sashimono-firewall"
     export MB_XRPL_SERVICE="sashimono-mb-xrpl"
     export REPUTATIOND_SERVICE="sashimono-reputationd"
     export SASHIADMIN_GROUP="sashiadmin"

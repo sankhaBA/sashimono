@@ -91,3 +91,12 @@ All the tests ran in a scratch folder with stubbed commands. Nothing ran on a re
 - **`systemctl enable nftables`.** This still runs at install and isn't undone at uninstall, because an operator may rely on it themselves. This should be decided together with M3.
 - **The `/root/.acme.sh` copy and the download fallback.** They're still made at install. Removing them is part of **H5** and **L4**. This fix only makes sure the uninstall cleans them up.
 - **H6 is not fully fixed.** While checking this code, we noticed `user-install.sh` still installs `nftables` with `apt-get` during instance creation (line 348). That's part of **H6**, which is marked as fixed, but its fix only removed the kernel package install.
+
+## 6. Update (2026-10-13)
+
+The firewall fix (H6, M1, M2, M3) changed two parts of this fix:
+
+- **The nft table cleanup is no longer a cleanup-script line.** `user-uninstall.sh` now deletes the instance's `inet docker_filter_<uid>` table itself. It runs on both rollback and normal removal, so a rollback still removes the table, and the tenant-owned cleanup script (H4) is no longer trusted with it.
+- **Nothing writes `/etc/nftables.conf` any more,** so the cleanup script no longer re-saves it. The full-uninstall sweep added here now also matches `inet` tables. Its `/etc/nftables.conf` cleanup only matters on hosts that ran Gadget's code.
+
+See `[H6, M1, M2, M3] LAN firewall (nftables) explained.md`.

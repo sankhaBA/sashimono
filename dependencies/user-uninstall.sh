@@ -160,6 +160,9 @@ for ((i = 0; i < $gp_tcp_port_count; i++)); do
     fi
 done
 
+echo "Removing nftables firewall rules of the instance."
+nft delete table inet docker_filter_$user_id 2>/dev/null
+
 echo "Deleting contract user '$contract_user'"
 userdel "$contract_user"
 

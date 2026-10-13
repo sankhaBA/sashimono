@@ -58,6 +58,7 @@ ACME_DNS_PLUGIN_URL="https://raw.githubusercontent.com/gadget78/sashimono/main/d
 
 # Check if users already exists.
 [ "$(id -u "$user" 2>/dev/null || echo -1)" -ge 0 ] && echo "HAS_USER,INST_ERR" && exit 1
+! command -v nft &>/dev/null && echo "NO_NFTABLES,INST_ERR" && exit 1
 
 function rollback() {
     echo "Rolling back user installation. $1"
@@ -342,65 +343,6 @@ echo "[Service]
 Environment=DOCKERD_ROOTLESS_ROOTLESSKIT_PORT_DRIVER=slirp4netns
 " >"$docker_service_override_conf"
 
-# check nftables is installed (TODO, add this check to the main evernode installer)
-if ! command -v nft &> /dev/null; then
-    echo "nftables not installed. Installing now..."
-    apt-get update && apt-get -y install nftables
-fi
-
-# Create nftables (aka iptables), to block traffic to the local LAN subnet (for IPv4 and IPv6)
-local_ip=$(hostname -I | awk '{print $1}' | xargs) 
-public_hostname_ip=$(dig +short "$EVERNODE_HOSTNAME" | head -n 1 | xargs)
-if [[ "$local_ip" != "$public_hostname_ip" ]]; then
-    nft flush table ip docker_filter_$user_id 2>/dev/null
-    nft delete table ip docker_filter_$user_id 2>/dev/null
-    nft add table ip docker_filter_$user_id
-    nft add chain ip docker_filter_$user_id OUTPUT '{ type filter hook output priority 0 ; policy accept ; }'
-    echo "sudo nft flush table ip docker_filter_$user_id 2>/dev/null && sudo nft delete table ip docker_filter_$user_id 2>/dev/null && echo \"Cleaned up docker_filter_$user_id table\"" >>$cleanup_script
-    echo "nft list ruleset > /etc/nftables.conf" >>$cleanup_script
-
-    echo "detected local ip to $local_ip, allowing."
-    nft add rule ip docker_filter_$user_id OUTPUT meta skuid $user_id ip daddr $local_ip accept
-
-    gateway=$(ip route show | grep default | awk '{print $3}')
-    if [ -z "$gateway" ]; then
-        echo "Warning: Could not detect gateway IP."
-    else
-        echo "detected gateway as $gateway, allowing."
-        nft add rule ip docker_filter_$user_id OUTPUT meta skuid $user_id ip daddr $gateway accept
-    fi
-
-    proxy_ip=$(jq -r ".proxy.ip | select( . != null )" "$MBXRPL_CONFIG" )
-    if [ -z "$proxy_ip" ]; then proxy_ip=$(jq -r ".proxy.npm_url | select( . != null )" "$MBXRPL_CONFIG" | awk -F[/:] '{print $4}'); fi
-    if [ -z "$proxy_ip" ]; then
-        echo "Warning: Could not detect proxy IP."
-    else
-        echo "detected proxy ip to $proxy_ip, allowing."
-        nft add rule ip docker_filter_$user_id OUTPUT meta skuid $user_id ip daddr $proxy_ip accept
-    fi
-
-    lan_subnet=$(ip route | grep -oP '(\d+\.\d+\.\d+\.\d+/\d+)' | head -n 1)
-    if [ -z "$lan_subnet" ]; then
-        echo "Error: Could not detect LAN subnet."
-    else
-        local_dns=$(grep '^nameserver' /etc/resolv.conf | awk 'NR==1 {print $2}')
-        if [ -z "$local_dns" ]; then
-            echo "Warning: Could not detect local DNS IP."
-        else
-            if [ "$(echo "$local_dns" | cut -d'.' -f1-2)" = "$(echo "$lan_subnet" | cut -d'.' -f1-2)" ]; then
-                echo "detected local DNS IP as $local_dns, allowing. (as within the lan subnet of $lan_subnet)"
-                nft add rule ip docker_filter_$user_id OUTPUT meta skuid $user_id ip daddr $local_dns accept
-            else
-                echo "detected local DNS IP as $local_dns, not part of lan subnet of $lan_subnet"
-            fi
-        fi
-        echo "detected lan subnet ip to $lan_subnet, blocking/dropping"
-        nft add rule ip docker_filter_$user_id OUTPUT meta skuid $user_id ip daddr $lan_subnet drop
-    fi
-else
-    echo "a stand alone evernode with no subnet detected, no extra ip table rules needed"
-fi
-
 # We need to enable ipv6 configurations if outbound ipv6 address is specified.
 if [ "$outbound_ipv6" != "-" ] && [ "$outbound_net_interface" != "-" ]; then
 
@@ -424,17 +366,15 @@ if [ "$outbound_ipv6" != "-" ] && [ "$outbound_net_interface" != "-" ]; then
     # Add the outbound ipv6 address to the specified network interface.
     ip addr add $outbound_ipv6 dev $outbound_net_interface
 
-    # add rules to iptables, to restrict access to ipv6 subnet
-    if [[ "$local_ip" != "$public_hostname_ip" ]]; then
-        ipv6_gateway=$(ip -6 route show | grep default | awk '{print $3}')
-        nft add rule ip6 docker_filter_$user_id OUTPUT ip6 daddr "$ipv6_gateway" accept
-        ipv6_subnet=$(ip -6 route show | grep -v default | grep -oP '([0-9a-f:]+/\d+)' | head -n 1)
-        nft add rule ip6 docker_filter_$user_id OUTPUT ip6 daddr "$ipv6_subnet" drop
-    fi
-
     # Add instructions to the cleanup script so the outbound ip assignment will be removed upon user uninstall.
     echo "ip addr del $outbound_ipv6 dev $outbound_net_interface" >>$cleanup_script
 fi
+
+# Apply the nftables firewall rules of the instance (blocks its access to the host and local networks).
+echo "Applying nftables firewall rules."
+"$script_dir"/user-firewall.sh "$(dirname "$SA_CONFIG")" "$user" || rollback "NFT_ERR"
+# Refresh the rules of the other instances as well, since the host addresses may have changed (eg. outbound ipv6 address).
+"$script_dir"/user-firewall.sh "$(dirname "$SA_CONFIG")" || echo "Warning: Refreshing the nftables firewall rules of other instances failed."
 
 # Overwrite docker-rootless cli args on the docker service unit file (ExecStart is not supported by override.conf).
 echo "Applying $docker_service extra args."
@@ -1013,9 +953,6 @@ MemoryMax=${memory}K
 CPUQuota=${cpu_quota}%
 MemorySwapMax=${swap_only_mem}K" | sudo tee /etc/systemd/system/user-$user_id.slice.d/override.conf
 
-# save and make sure nft tables service persist after a restart
-nft list ruleset > /etc/nftables.conf
-systemctl enable nftables
 systemctl daemon-reload
 
 echo "$user_id,$user,$dockerd_socket,INST_SUC"

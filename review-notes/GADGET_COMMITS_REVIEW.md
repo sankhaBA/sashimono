@@ -102,9 +102,9 @@ Testing did not show problems because most of the risky code only runs in specia
 | H4 | Root runs a tenant-owned cleanup script on uninstall | 🟠 High | Security | Confirmed | Medium | Open |
 | H5 | Code downloaded at runtime from a personal GitHub branch | 🟠 High | Security / supply chain | Confirmed | Easy | Open |
 | H6 | Packages (including a kernel) installed during instance creation | 🟠 High | Operations | Confirmed | Easy | ✅ Fixed |
-| M1 | IPv6 LAN rules never applied (missing table) | 🟡 Medium | Security / bug | Confirmed | Easy | Open |
-| M2 | LAN protection is a weak heuristic | 🟡 Medium | Security | Confirmed | Medium | Open |
-| M3 | `nft list ruleset > /etc/nftables.conf` overwrites host config | 🟡 Medium | Operations | Confirmed | Medium | Open |
+| M1 | IPv6 LAN rules never applied (missing table) | 🟡 Medium | Security / bug | Confirmed | Easy | ✅ Fixed |
+| M2 | LAN protection is a weak heuristic | 🟡 Medium | Security | Confirmed | Medium | ✅ Fixed |
+| M3 | `nft list ruleset > /etc/nftables.conf` overwrites host config | 🟡 Medium | Operations | Confirmed | Medium | ✅ Fixed |
 | M4 | `docker pull` has no timeout | 🟡 Medium | Reliability | Confirmed | Easy | Open |
 | M5 | Image cache and digest check is inconsistent | 🟡 Medium | Bug | Confirmed | Easy | Open |
 | M6 | Race conditions in the `docker_recreate` / `docker_vars` services | 🟡 Medium | Reliability | Likely | Hard | Open |
@@ -247,7 +247,7 @@ Testing did not show problems because most of the risky code only runs in specia
 
 ### 🟡 Medium
 
-#### M1. IPv6 LAN rules never applied (Confirmed)
+#### M1. IPv6 LAN rules never applied (Confirmed), ✅ FIXED
 
 - **Where:** [user-install.sh:514-520](dependencies/user-install.sh#L514-L520).
 - **What happens:** The rules are added to `ip6 docker_filter_<uid>`, but only the `ip` (IPv4) table is ever created (line 446). The commands fail and the error is ignored, so **no IPv6 protection exists**. Also:
@@ -256,7 +256,7 @@ Testing did not show problems because most of the risky code only runs in specia
 - **Fix:** Create an `ip6` table and chain, add `meta skuid $user_id` to the rules, and clean both tables. (Or use one `inet` table for both IPv4 and IPv6.)
 - **Feasibility:** Easy.
 
-#### M2. LAN protection is a weak heuristic (Confirmed)
+#### M2. LAN protection is a weak heuristic (Confirmed), ✅ FIXED
 
 - **Where:** [user-install.sh:440-489](dependencies/user-install.sh#L440-L489).
 - **Problems:**
@@ -268,7 +268,7 @@ Testing did not show problems because most of the risky code only runs in specia
 - **Fix:** By default, block all private and link-local ranges: `10/8`, `172.16/12`, `192.168/16`, `169.254/16`, `fc00::/7`, `fe80::/10`. Then allow only what is needed, for example port 53 to the configured resolver.
 - **Feasibility:** Medium.
 
-#### M3. `nft list ruleset > /etc/nftables.conf` overwrites host config (Confirmed)
+#### M3. `nft list ruleset > /etc/nftables.conf` overwrites host config (Confirmed), ✅ FIXED
 
 - **Where:** [user-install.sh:1125-1127](dependencies/user-install.sh#L1125-L1127) and the cleanup lines 1043 and 1093.
 - **What happens:**
@@ -642,3 +642,31 @@ Explanation: `changes/[L6, L11] Repeated code blocks and image name stripping ex
   - **Not yet done:** a real rollback, a lease removal and a full uninstall on a test host.
 
 Explanation: `changes/[L2] Leaks on rollback and uninstall explained.md`.
+
+### 2026-10-13: H6 (rest), M1, M2, M3 fixed (LAN firewall moved to user-firewall.sh)
+
+- **Findings closed:** M1, M2, M3, and the rest of H6 (the runtime `apt-get install nftables` noted in the L2 entry above).
+- **Files changed:** `dependencies/user-firewall.sh` (new), `dependencies/user-install.sh`, `dependencies/user-uninstall.sh`, `installer/sashimono-install.sh`, `installer/sashimono-uninstall.sh`, `installer/setup.sh`, `CMakeLists.txt`, `README.md`.
+- **What changed:**
+  - **H6.** `check_dependencies()` in `sashimono-install.sh` installs `nftables` if `nft` is missing, and aborts if that fails. It runs on both a fresh install and `evernode update`. `user-install.sh` no longer installs packages: if `nft` is missing it stops with `NO_NFTABLES,INST_ERR` before anything is created.
+  - **M1, M2.** The firewall code moved out of `user-install.sh` into `user-firewall.sh <data dir> [user]`, modelled on `user-cgcreate.sh`. Each instance gets one `inet docker_filter_<uid>` table (IPv4 and IPv6), loaded in one `nft -f` transaction. Only packets sent by the instance user (`meta skuid`) are checked:
+    - **Allowed:** replies to inbound connections (`ct state established,related`); DNS (port 53) to every resolver in `/etc/resolv.conf` and `/run/systemd/resolve/resolv.conf`; TCP 80/443 and the instance port ranges (from `sa.cfg`) on the host's own addresses; the NPMplus API host and port from `proxy.npm_url`.
+    - **Rejected:** everything else on the host's own addresses, `10/8`, `100.64/10`, `169.254/16`, `172.16/12`, `192.168/16`, `224/4`, `255.255.255.255`, `fc00::/7`, `fe80::/10`, `ff00::/8`, and every on-link IPv6 prefix.
+    - It applies on every host. The VPS skip, the gateway / local IP / proxy allows on all ports, the "first CIDR" detection and the 2-octet DNS check are gone. `proxy.ip` is no longer read.
+  - **M3.** Nothing writes `/etc/nftables.conf` or enables `nftables.service` any more. A new root oneshot service, `sashimono-firewall` (installed, upgraded and removed like `sashimono-cgcreate`), re-applies every instance's table:
+    - at boot, after `network-online.target` and before `systemd-user-sessions.service`, so before any tenant's `user@<uid>` services start;
+    - whenever `nftables.service` is restarted or reloaded (`PartOf=`, `ReloadPropagatedFrom=`), because that flushes the ruleset.
+  - **Install and uninstall.** `user-install.sh` applies the new instance's table after the outbound IPv6 address is added (`rollback "NFT_ERR"` on failure), then refreshes every instance's table best-effort, so all tables know the host's current addresses. `user-uninstall.sh` now deletes the table itself. This replaces the cleanup-script lines added by the L2 fix, because that script is tenant-owned (H4). The full-uninstall sweep from the L2 fix now also matches `inet` tables.
+- **Why:** Gadget's firewall was skipped on most VPS hosts (cloud metadata and the VPC stayed open), blocked only the first subnet it found, opened the gateway and proxy on every port, had no working IPv6 rules, and kept itself across reboots by overwriting the operator's whole `/etc/nftables.conf`. A fixed "block private, allow what's needed" rule set needs no LAN guessing. Rebuilding it at boot, as cgcreate does for resource limits, needs no saved copy.
+- **Not changed:**
+  - The rules use the host's addresses and resolvers at boot, install or nftables reload time. If DHCP changes them in between, the tables catch up at the next of those.
+  - `systemctl restart nftables` leaves about 0.6 s without tenant rules, because nftables' own stop step flushes everything and our service can only run after it. `reload` has no gap.
+  - Gadget's code was never released, so only dev/test hosts can still have its dumped `/etc/nftables.conf` and an enabled `nftables.service`. The full-uninstall cleanup from the L2 fix still covers them.
+  - The NPMplus allow stays until the domain/SSL design review (C3, C4, H1).
+  - Two different hosts on the same LAN that reach each other through split DNS are still blocked. Gadget's version blocked that too.
+- **Verified:**
+  - In isolated network namespaces with Ubuntu 20.04's nft 0.9.3: the script and its single-user, all-users, invalid-user and failure paths; LAN, metadata, host-port and IPv6 rejects; instance-port, internet and loopback allows; inbound TCP/UDP replies; other users not affected; and a dump/flush/reload round trip.
+  - On a real Vultr host with a 5-node contract: `nft -c` accepted the ruleset built from the host's real data; all 5 nodes peered through the host's public IP and stayed in consensus with 0 rejected packets. As a tenant uid, metadata, host SSH (IPv4 and IPv6) and the on-link IPv6 LAN were rejected, while root could reach them; the peer port, internet and DNS worked. `evernode delete` removed exactly that instance's table. `systemctl reload nftables` and `systemctl restart nftables` both rebuilt every table, leaving ufw's rules and the contract unaffected.
+  - **Not yet done:** a reboot, and a forced `NFT_ERR` rollback.
+
+Explanation: `changes/[H6, M1, M2, M3] LAN firewall (nftables) explained.md`.

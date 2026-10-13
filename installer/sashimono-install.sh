@@ -30,6 +30,8 @@ extra_txn_fee=${23}
 fallback_rippled_servers=${24}
 
 script_dir=$(dirname "$(realpath "$0")")
+# Fallback for upgrades started from a setup.sh older than the firewall service.
+FIREWALL_SERVICE=${FIREWALL_SERVICE:-sashimono-firewall}
 desired_slirp4netns_version="1.2.1"
 
 mb_cli_exit_success="MB_CLI_SUCCESS"
@@ -308,6 +310,12 @@ function check_dependencies() {
         chmod +x /tmp/slirp4netns
         mv /tmp/slirp4netns /usr/bin/
     fi
+
+    if ! command -v nft &>/dev/null; then
+        stage "Installing nftables"
+        apt-get update >/dev/null
+        ! apt-get -y install nftables >/dev/null && echo "Error when installing nftables." && abort
+    fi
 }
 
 function exec_mb() {
@@ -466,6 +474,7 @@ function upgrade() {
 if [[ "$UPGRADE" == "1" ]]; then
     systemctl stop $SASHIMONO_SERVICE
     systemctl stop $CGCREATE_SERVICE
+    systemctl stop $FIREWALL_SERVICE
     sudo -u "$MB_XRPL_USER" XDG_RUNTIME_DIR="$mb_user_runtime_dir" systemctl --user stop $MB_XRPL_SERVICE
 fi
 
@@ -496,7 +505,7 @@ rm -r "$tmp"
         -out $SASHIMONO_DATA/contract_template/cfg/tlscert.pem -subj "/C=HP/CN=$(jq -r '.hp.host_address' $SASHIMONO_DATA/sa.cfg)"
 
 # Install Sashimono agent binaries into sashimono bin dir.
-cp "$script_dir"/{sagent,hpfs,user-cgcreate.sh,user-install.sh,dns_evernode.sh,user-uninstall.sh,docker-registry-uninstall.sh} $SASHIMONO_BIN
+cp "$script_dir"/{sagent,hpfs,user-cgcreate.sh,user-firewall.sh,user-install.sh,dns_evernode.sh,user-uninstall.sh,docker-registry-uninstall.sh} $SASHIMONO_BIN
 chmod -R +x $SASHIMONO_BIN
 
 # Setup tls certs used for contract instance websockets.
@@ -511,7 +520,7 @@ chmod -R +x $SASHIMONO_BIN
 # Install Sashimono CLI binaries into user bin dir.
 cp "$script_dir"/sashi $USER_BIN
 
-# Check whether denedencies are installed or not. (slirp4netns)
+# Check whether denedencies are installed or not. (slirp4netns, nftables)
 check_dependencies
 
 # Download and install rootless dockerd.
@@ -617,6 +626,27 @@ ExecStart=$SASHIMONO_BIN/user-cgcreate.sh $SASHIMONO_DATA
 [Install]
 WantedBy=multi-user.target" >/etc/systemd/system/$CGCREATE_SERVICE.service
 
+# Install Sashimono firewall service.
+# This is a oneshot service which applies the nftables firewall rules for all sashimono users every time the system boots up.
+# It runs once the network is online (to detect the host addresses and DNS servers) and before the users' services start.
+# It is also re-run whenever nftables.service is restarted or reloaded, since that flushes the ruleset.
+echo "[Unit]
+Description=Sashimono firewall service.
+Wants=network-online.target
+After=network-online.target nftables.service
+Before=systemd-user-sessions.service
+PartOf=nftables.service
+ReloadPropagatedFrom=nftables.service
+[Service]
+User=root
+Group=root
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=$SASHIMONO_BIN/user-firewall.sh $SASHIMONO_DATA
+ExecReload=$SASHIMONO_BIN/user-firewall.sh $SASHIMONO_DATA
+[Install]
+WantedBy=multi-user.target nftables.service" >/etc/systemd/system/$FIREWALL_SERVICE.service
+
 echo "Configuring sashimono agent service..."
 
 # Since gp ports are added as new feature we manually configure the default on upgrade mode if not exists.
@@ -672,6 +702,8 @@ WantedBy=multi-user.target" >/etc/systemd/system/$SASHIMONO_SERVICE.service
 systemctl daemon-reload
 systemctl enable $CGCREATE_SERVICE
 systemctl start $CGCREATE_SERVICE
+systemctl enable $FIREWALL_SERVICE
+systemctl start $FIREWALL_SERVICE
 systemctl enable $SASHIMONO_SERVICE
 # Here, $SASHIMONO_SERVICE is only enabled. Not started. It'll be started after pending reboot checks at
 # the bottom of this script.

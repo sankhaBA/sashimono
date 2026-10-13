@@ -3,6 +3,8 @@
 # This must be executed with root privileges.
 
 export TRANSFER=${TRANSFER:-0}
+# Fallback for uninstalls started from a setup.sh older than the firewall service.
+FIREWALL_SERVICE=${FIREWALL_SERVICE:-sashimono-firewall}
 
 mb_cli_exit_success="MB_CLI_SUCCESS"
 mb_cli_out_prefix="CLI_OUT"
@@ -253,14 +255,14 @@ if [ "$UPGRADE" == "0" ]; then
     done
 
     if command -v nft &>/dev/null; then
-        nft list tables 2>/dev/null | grep -E '^table ip6? docker_filter_[0-9]+$' | while read -r _ family table; do
+        nft list tables 2>/dev/null | grep -E '^table (ip|ip6|inet) docker_filter_[0-9]+$' | while read -r _ family table; do
             echo "Removing leftover nft table $family $table..."
             nft delete table "$family" "$table"
         done
     fi
-    if [ -f /etc/nftables.conf ] && grep -qE '^table ip6? docker_filter_[0-9]+ \{$' /etc/nftables.conf; then
+    if [ -f /etc/nftables.conf ] && grep -qE '^table (ip|ip6|inet) docker_filter_[0-9]+ \{$' /etc/nftables.conf; then
         echo "Removing Sashimono tables from /etc/nftables.conf (backup saved as /etc/nftables.conf.sashimono-bak)..."
-        sed -i.sashimono-bak -E '/^table ip6? docker_filter_[0-9]+ \{$/,/^\}$/d' /etc/nftables.conf
+        sed -i.sashimono-bak -E '/^table (ip|ip6|inet) docker_filter_[0-9]+ \{$/,/^\}$/d' /etc/nftables.conf
     fi
     # The folder is removed only if nothing else is in it.
     rm -f /root/.acme.sh/dns_evernode.sh
@@ -272,6 +274,11 @@ echo "Removing Sashimono cgroup creation service..."
 systemctl stop $CGCREATE_SERVICE
 systemctl disable $CGCREATE_SERVICE
 rm /etc/systemd/system/$CGCREATE_SERVICE.service
+
+echo "Removing Sashimono firewall service..."
+systemctl stop $FIREWALL_SERVICE
+systemctl disable $FIREWALL_SERVICE
+rm /etc/systemd/system/$FIREWALL_SERVICE.service
 
 echo "Removing Sashimono service..."
 systemctl stop $SASHIMONO_SERVICE
