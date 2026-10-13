@@ -106,7 +106,7 @@ Testing did not show problems because most of the risky code only runs in specia
 | M2 | LAN protection is a weak heuristic | 🟡 Medium | Security | Confirmed | Medium | ✅ Fixed |
 | M3 | `nft list ruleset > /etc/nftables.conf` overwrites host config | 🟡 Medium | Operations | Confirmed | Medium | ✅ Fixed |
 | M4 | `docker pull` has no timeout | 🟡 Medium | Reliability | Confirmed | Easy | Open |
-| M5 | Image cache and digest check is inconsistent | 🟡 Medium | Bug | Confirmed | Easy | Open |
+| M5 | Image cache and digest check is inconsistent | 🟡 Medium | Bug | Confirmed | Easy | 🟡 Partly fixed (Docker Hub URLs, see L9) |
 | M6 | Race conditions in the `docker_recreate` / `docker_vars` services | 🟡 Medium | Reliability | Likely | Hard | Open |
 | M7 | Tenant-writable `env.vars` is sourced in the host user's `.bashrc` | 🟡 Medium | Security | Confirmed | Easy | Open |
 | M8 | Custom image settings are not validated | 🟡 Medium | Input validation | Confirmed | Easy | Open |
@@ -123,7 +123,7 @@ Testing did not show problems because most of the risky code only runs in specia
 | L6 | Repeated code blocks | 🔵 Low | Code quality | Confirmed | Easy | ✅ Fixed |
 | L7 | Scripts generated through 3 to 4 levels of escaping | 🔵 Low | Maintainability | Confirmed | Medium | Open |
 | L8 | Weak error handling patterns | 🔵 Low | Code quality | Confirmed | Easy | Open |
-| L9 | Hard-coded paths, URLs and DNS servers | 🔵 Low | Standards | Confirmed | Easy | Open |
+| L9 | Hard-coded paths, URLs and DNS servers | 🔵 Low | Standards | Confirmed | Easy | ✅ Fixed |
 | L10 | Unquoted variables and other shell style issues | 🔵 Low | Standards | Confirmed | Easy | Open |
 | L11 | C++ `--` stripping is undocumented and loose | 🔵 Low | Code quality | Confirmed | Easy | ✅ Fixed |
 | L12 | Process: huge mixed commits, no build check, no tests | 🔵 Low | Process | Confirmed | Easy | Open |
@@ -285,7 +285,7 @@ Testing did not show problems because most of the risky code only runs in specia
 - **Fix:** `timeout --foreground -s SIGINT "${docker_pull_timeout_secs}s" docker pull ... || rollback "DOCKER_PULL"`.
 - **Feasibility:** Easy.
 
-#### M5. Image cache and digest check is inconsistent (Confirmed)
+#### M5. Image cache and digest check is inconsistent (Confirmed), 🟡 PARTLY FIXED (Docker Hub URLs only, see the L9 fix log entry)
 
 - **Where:** [user-install.sh:543-595](dependencies/user-install.sh#L543-L595).
 - **Problems:**
@@ -454,7 +454,7 @@ Testing did not show problems because most of the risky code only runs in specia
 - Many `|| true`, `2>/dev/null` and `|| echo "..."` hide real failures (quota, nft, apt).
 - **Fix:** Check each critical command, and roll back or stop on failure. **Easy.**
 
-#### L9. Hard-coded paths, URLs and DNS servers
+#### L9. Hard-coded paths, URLs and DNS servers, ✅ FIXED
 
 - `/usr/bin/sashimono/...` is used instead of `$script_dir`.
 - Docker Hub URLs are hard-coded.
@@ -670,3 +670,48 @@ Explanation: `changes/[L2] Leaks on rollback and uninstall explained.md`.
   - **Not yet done:** a reboot, and a forced `NFT_ERR` rollback.
 
 Explanation: `changes/[H6, M1, M2, M3] LAN firewall (nftables) explained.md`.
+### 2026-10-13: L9 fixed, M5 partly fixed (hard-coded paths, URLs and DNS servers)
+
+- **Findings closed:** L9. **Partly:** M5, only its "Docker Hub URLs are hard-coded" part.
+- **Files changed:** `dependencies/user-install.sh` (and the `domain_ssl_update.sh` it generates), `dependencies/dns_evernode.sh`.
+- **What changed:**
+  - **Paths.** The 9 hard-coded `/usr/bin/sashimono/...` paths in the acme.sh setup now use `$script_dir`.
+  - **Docker Hub URLs.**
+    - A new helper, `docker_hub_repo()`, maps an image to its Docker Hub repository (`ubuntu:22.04` → `library/ubuntu`, `docker.io/x/y` → `x/y`). It returns nothing for other registries.
+    - The image-cache check only queries Docker Hub for Docker Hub images, using the correct repository name. Other registries skip the Docker Hub check and use the cached copy, or pull.
+  - **DNS server.**
+    - A new optional `mb-xrpl.cfg` key, `proxy.dns_resolver` (default `8.8.8.8`; must be an IP or host name), is used by both the TXT authorization check (was `@1.1.1.1`) and the acme.sh plugin (was a hard-coded `@8.8.8.8`).
+    - The generated script exports it as `EVERNODE_DNS_RESOLVER`, and `dns_evernode.sh` reads it.
+  - **Proxy target (kept simple).**
+    - NPMplus now forwards to this host's address on the route to the NPMplus server (`ip route get`).
+    - It falls back to the old first `hostname -I` address when NPMplus is local or no route is found.
+    - The `proxy_ip` lookup was moved out of the firewall `if`, so standalone hosts have it too. The firewall rules are unchanged.
+    - The forward scheme (`https`) and port (`gptcp1`) were deliberately left as they were.
+  - **`www.` alias.**
+    - A tenant's own domain gets its `www.` twin (or bare twin) only when that name resolves. Generated subdomains never get one.
+    - The same name list goes into the proxy host, both NPMplus certificate requests and the acme.sh call (extra `--domain`), so the certificate covers every proxy name.
+    - The `${domain//www./}` replacement, which turned `shop.awww.io` into `shop.aio`, is gone.
+- **Why:**
+  - Each value only worked on a host set up like Gadget's.
+  - Other install paths triggered GitHub downloads.
+  - The cache check sent official and non-Docker-Hub images to the wrong place.
+  - The two DNS servers could disagree and couldn't be changed.
+  - With a remote NPMplus, the proxy could point at a docker bridge address.
+  - The `www.` alias always had a certificate error.
+- **Not changed:**
+  - The rest of M5: digest file written/read mismatch, the `mkdir -p` defeating the cache check, no lock, and the private registry mirror not used by the check.
+  - The download fallback itself (H5).
+  - Documenting all `proxy.*` keys (L1). The new key is described in a comment where it's read.
+  - Existing certificates are not reissued to add the twin.
+  - The proxy scheme and port (they would need M8's validation first).
+- **Verified:**
+  - `docker_hub_repo()` passes 15 unit cases.
+  - With stubbed `curl`/`docker`, Docker Hub images make the same requests as before, `ubuntu` now uses `library/ubuntu`, and `ghcr.io` images no longer query Docker Hub.
+  - With stubbed `dig`/`getent`/`ip`/`hostname`, the proxy name list, acme args and forward host are correct in 9 cases (including `shop.awww.io`, a generated subdomain, a remote NPMplus and every fallback), and all four NPMplus JSON payloads are valid (`jq`).
+  - The firewall `nft` calls are identical to before in 4 setups.
+  - The rendered `domain_ssl_update.sh` diff shows only the intended changes, and both versions pass `bash -n`.
+  - `shellcheck`: `user-install.sh` 109 → 103 findings with nothing new; the generated script unchanged at 12; `dns_evernode.sh` unchanged at its 1 existing false positive (the now-variable `$nameserver_override` is quoted).
+  - **Not yet done:** a real custom-domain instance on a local and a remote NPMplus host, and a non-Docker-Hub image on a real host.
+
+Explanation: `changes/[L9] Hard-coded paths, URLs and DNS servers explained.md`.
+

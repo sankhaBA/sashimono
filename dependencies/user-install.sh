@@ -49,6 +49,16 @@ SA_CONFIG="/etc/sashimono/sa.cfg"
 MBXRPL_CONFIG="/etc/sashimono/mb-xrpl/mb-xrpl.cfg"
 TLS_TYPE=$(jq -r ".proxy.tls_type | select( . != null )" "$MBXRPL_CONFIG")
 EVERNODE_HOSTNAME="$(jq -r ".hp.host_address | select( . != null )" "$SA_CONFIG")"
+# NPMplus server address (proxy.ip, or the npm_url host), used for the proxy target in domain_ssl_update.sh.
+proxy_ip=$(jq -r ".proxy.ip | select( . != null )" "$MBXRPL_CONFIG")
+if [ -z "$proxy_ip" ]; then proxy_ip=$(jq -r ".proxy.npm_url | select( . != null )" "$MBXRPL_CONFIG" | awk -F[/:] '{print $4}'); fi
+# DNS server for the custom-domain checks: the TXT authorization check and the acme.sh DNS plugin (dns_evernode.sh).
+DNS_RESOLVER=$(jq -r ".proxy.dns_resolver | select( . != null )" "$MBXRPL_CONFIG")
+if [[ -n "$DNS_RESOLVER" ]] && [[ ! "$DNS_RESOLVER" =~ ^[A-Za-z0-9.:-]+$ ]]; then
+    echo "Ignoring invalid proxy.dns_resolver value '$DNS_RESOLVER', using the default."
+    DNS_RESOLVER=""
+fi
+DNS_RESOLVER=${DNS_RESOLVER:-8.8.8.8}
 
 # configured urls
 DOCKER_AUTH_URL="https://auth.docker.io/token?service=registry.docker.io&scope=repository:"
@@ -65,6 +75,24 @@ function rollback() {
     "$script_dir"/user-uninstall.sh "$user"
     echo "Rolled back the installation."
     echo "$1,INST_ERR" && exit 1
+}
+
+# Prints the Docker Hub repository of an image, for example "ubuntu:22.04" -> "library/ubuntu" and
+# "evernode/sashimono:hp.latest" -> "evernode/sashimono". Prints nothing if the image comes from another
+# registry (its first part is a host, such as "ghcr.io/..." or "myhost:5000/..."), because the Docker Hub
+# URLs (DOCKER_AUTH_URL, DOCKER_REGISTRY_URL) don't apply to it.
+function docker_hub_repo() {
+    local repo="${1%@*}" # Drop a digest.
+    # Drop the tag: the part after the last ':', but only if that ':' is after the last '/'.
+    [[ "${repo##*/}" == *:* ]] && repo="${repo%:*}"
+    local first="${repo%%/*}"
+    if [[ "$repo" == */* ]]; then
+        case "$first" in
+        docker.io | index.docker.io | registry-1.docker.io) repo="${repo#*/}" ;;
+        *.* | *:* | localhost) return 0 ;;
+        esac
+    fi
+    [[ "$repo" == */* ]] && echo "$repo" || echo "library/$repo"
 }
 
 # Waits until a service becomes ready up to 3 seconds.
@@ -393,6 +421,9 @@ service_ready $docker_service || rollback "NO_DOCKERSVC"
 echo "finished Installing rootless dockerd."
 
 
+# Docker Hub repository of the image, or empty if the image is from another registry.
+hub_repo=$(docker_hub_repo "$docker_pull_image")
+
 img_local_path=$docker_img_dir/$(echo "$docker_pull_image" | tr : -)
 mkdir -p $img_local_path
 img_local_tar_path="$img_local_path.tar"
@@ -409,9 +440,14 @@ if [[ ! -d "$img_local_path" ]] || [[ ! -f "${img_local_tar_path}.image_digest" 
     DOCKER_HOST="$dockerd_socket" "$docker_bin"/docker pull $docker_pull_image || rollback "DOCKER_PULL"
     
         
-    echo "retrieving and saving image hash(digest) to file..."
-    TOKEN=$(curl -s "${DOCKER_AUTH_URL}$(echo "$docker_pull_image" | cut -d':' -f1):pull" | jq -r '.token') \
-    && IMAGE_DIGEST=$(curl -s --head -H "Authorization: Bearer $TOKEN" ${DOCKER_REGISTRY_URL}$(echo "$docker_pull_image" | cut -d':' -f1)/manifests/${docker_image_version} | sed -n 's/.*[Dd]ocker-[Cc]ontent-[Dd]igest: \(sha256:[a-f0-9]*\).*/\1/p')
+    IMAGE_DIGEST=""
+    if [[ -n "$hub_repo" ]]; then
+        echo "retrieving and saving image hash(digest) to file..."
+        TOKEN=$(curl -s "${DOCKER_AUTH_URL}${hub_repo}:pull" | jq -r '.token') \
+        && IMAGE_DIGEST=$(curl -s --head -H "Authorization: Bearer $TOKEN" "${DOCKER_REGISTRY_URL}${hub_repo}/manifests/${docker_image_version}" | sed -n 's/.*[Dd]ocker-[Cc]ontent-[Dd]igest: \(sha256:[a-f0-9]*\).*/\1/p')
+    else
+        echo "image is not from Docker Hub, so there is no Docker Hub digest to save."
+    fi
     echo "$IMAGE_DIGEST" > ${img_local_tar_path}.image_digest
 
     echo "Saving the downloaded image as a tarball: $img_local_tar_path"
@@ -421,9 +457,15 @@ if [[ ! -d "$img_local_path" ]] || [[ ! -f "${img_local_tar_path}.image_digest" 
 else
 
     echo "Image $docker_pull_image, already exists locally,"
-    TOKEN=$(curl -s "${DOCKER_AUTH_URL}$(echo "$docker_pull_image" | cut -d':' -f1):pull" | jq -r '.token') \
-    && IMAGE_DIGEST=$(curl -s --head -H "Authorization: Bearer $TOKEN" ${DOCKER_REGISTRY_URL}$(echo "$docker_pull_image" | cut -d':' -f1)/manifests/${docker_image_version} | sed -n 's/.*[Dd]ocker-[Cc]ontent-[Dd]igest: \(sha256:[a-f0-9]*\).*/\1/p') \
-    && RATE_LIMIT_REMAINING=$(curl -s --head -s -H "Authorization: Bearer $TOKEN" ${DOCKER_REGISTRY_URL}$(echo "$docker_pull_image" | cut -d':' -f1)/manifests/${docker_image_version} | sed -n 's/.*[Rr]atelimit-remaining: \([0-9]*\).*/\1/p')
+    IMAGE_DIGEST=""
+    RATE_LIMIT_REMAINING=""
+    if [[ -n "$hub_repo" ]]; then
+        TOKEN=$(curl -s "${DOCKER_AUTH_URL}${hub_repo}:pull" | jq -r '.token') \
+        && IMAGE_DIGEST=$(curl -s --head -H "Authorization: Bearer $TOKEN" "${DOCKER_REGISTRY_URL}${hub_repo}/manifests/${docker_image_version}" | sed -n 's/.*[Dd]ocker-[Cc]ontent-[Dd]igest: \(sha256:[a-f0-9]*\).*/\1/p') \
+        && RATE_LIMIT_REMAINING=$(curl -s --head -s -H "Authorization: Bearer $TOKEN" "${DOCKER_REGISTRY_URL}${hub_repo}/manifests/${docker_image_version}" | sed -n 's/.*[Rr]atelimit-remaining: \([0-9]*\).*/\1/p')
+    else
+        echo "image is not from Docker Hub, so it is not checked against Docker Hub."
+    fi
 
     # Check if re-pull is needed, and we have a good amount of "remaining" rate pulls left
     if [[ "$IMAGE_DIGEST" != "$(cat "${img_local_path}/image_digest" 2>/dev/null)" ]] && [[ "$RATE_LIMIT_REMAINING" =~ ^[0-9]+$ ]] && [[ "$RATE_LIMIT_REMAINING" -gt 60 ]]; then
@@ -487,22 +529,22 @@ if [[ "$TLS_TYPE" == "NPMplus" ]]; then
     echo "NPMplus install detected"
 
     if [[ -n "$custom_docker_domain" ]]; then
-        if [[ ! -f "/usr/bin/sashimono/acme.sh" ]]; then
+        if [[ ! -f "$script_dir/acme.sh" ]]; then
             echo "base acme.sh missing, re-installing"
-            wget -O /usr/bin/sashimono/acme.sh "$ACME_SH_URL"
-            chmod +x /usr/bin/sashimono/acme.sh
+            wget -O "$script_dir"/acme.sh "$ACME_SH_URL"
+            chmod +x "$script_dir"/acme.sh
         fi
-        if [[ ! -f "/usr/bin/sashimono/dns_evernode.sh" ]]; then
+        if [[ ! -f "$script_dir/dns_evernode.sh" ]]; then
             echo "base evernode dns plugin for acme.sh missing, re-installing"
-            wget -O /usr/bin/sashimono/dns_evernode.sh "$ACME_DNS_PLUGIN_URL"
-            chmod +x /usr/bin/sashimono/dns_evernode.sh
+            wget -O "$script_dir"/dns_evernode.sh "$ACME_DNS_PLUGIN_URL"
+            chmod +x "$script_dir"/dns_evernode.sh
             mkdir -p /root/.acme.sh
-            cp /usr/bin/sashimono/dns_evernode.sh /root/.acme.sh/dns_evernode.sh
+            cp "$script_dir"/dns_evernode.sh /root/.acme.sh/dns_evernode.sh
         fi
 
         mkdir -p $user_dir/.acme.sh/
-        cp /usr/bin/sashimono/acme.sh $user_dir/.acme.sh/acme.sh
-        cp /usr/bin/sashimono/dns_evernode.sh $user_dir/.acme.sh/dns_evernode.sh
+        cp "$script_dir"/acme.sh $user_dir/.acme.sh/acme.sh
+        cp "$script_dir"/dns_evernode.sh $user_dir/.acme.sh/dns_evernode.sh
         chown -R $user:$user $user_dir/.acme.sh/
     fi
 
@@ -517,6 +559,9 @@ tls_type="$TLS_TYPE"
 instance_slot=${user_port: -1}
 web_port="$gp_tcp_port_start"
 EVERNODE_HOSTNAME="$EVERNODE_HOSTNAME"
+dns_resolver="$DNS_RESOLVER"
+# Read by the acme.sh DNS plugin (dns_evernode.sh), so it queries the same DNS server as the checks below.
+export EVERNODE_DNS_RESOLVER="\$dns_resolver"
 
 # Downloads certificate \$NPM_CERT_ID from NPMplus into the contract's tls folder, and sets NPM_CERT_ID_STRING to use it.
 # Returns 1 if the download or unzip fails, so the caller can fall back to no SSL.
@@ -554,7 +599,7 @@ fi
 # 2nd check if domain has authorization to be used in this instance.
 if [[ -n "\$custom_docker_domain" ]]; then
     contract_publickey=\$(jq -r ".contract.bin_args | select( . != null )" "$user_dir/$contract_dir/cfg/hp.cfg") || true
-    domain_txtrecord=\$(dig +short +time=10 +tries=3 TXT "\$custom_docker_domain" @1.1.1.1)
+    domain_txtrecord=\$(dig +short +time=10 +tries=3 TXT "\$custom_docker_domain" @"\$dns_resolver")
     if echo "\$domain_txtrecord" | grep -q "\$contract_publickey"; then
         echo "contract public key, '\$contract_publickey'"
         echo "domain authorized, as found in the TXT records of \$custom_docker_domain, :\$domain_txtrecord"
@@ -590,6 +635,33 @@ if [[ "\$tls_type" == "NPMplus" ]]; then
             custom_docker_subdomain="\${custom_docker_domain%%.*}"
             echo "no custom domain settings found, setting up a default route of, \$custom_docker_domain"
         fi
+
+        # Names for the proxy host and its certificate. A tenant's own domain also gets its "www." twin (or the bare
+        # domain, if it was given with "www."), but only when that name resolves. Generated subdomains get no twin.
+        # The proxy and the certificate use this same list, so the certificate covers every name the proxy serves.
+        alias_domain=""
+        if [[ -z "\$custom_docker_subdomain" ]]; then
+            if [[ "\$custom_docker_domain" == www.* ]]; then alias_candidate="\${custom_docker_domain#www.}"; else alias_candidate="www.\$custom_docker_domain"; fi
+            if [[ -n "\$(dig +short "\$alias_candidate" @"\$dns_resolver")" ]]; then alias_domain="\$alias_candidate"; fi
+        fi
+        proxy_domain_names="\"\$custom_docker_domain\""
+        acme_alias_args=()
+        if [[ -n "\$alias_domain" ]]; then
+            proxy_domain_names="\$proxy_domain_names,\"\$alias_domain\""
+            acme_alias_args=(--domain "\$alias_domain")
+        fi
+        echo "proxy and certificate names: \$proxy_domain_names"
+
+        # Address NPMplus forwards to: this host's address on the route to the NPMplus server (proxy.ip, or the
+        # npm_url host). Falls back to the first "hostname -I" address, as before, if NPMplus is on this host or no route is found.
+        proxy_ip="$proxy_ip"
+        forward_host=""
+        if [[ -n "\$proxy_ip" ]]; then
+            proxy_addr=\$(getent ahostsv4 "\$proxy_ip" | awk 'NR == 1 {print \$1}')
+            if [[ -n "\$proxy_addr" ]]; then forward_host=\$(ip -o route get "\$proxy_addr" 2>/dev/null | awk '{for (i = 1; i < NF; i++) if (\$i == "src") {print \$(i + 1); exit}}'); fi
+        fi
+        if [[ -z "\$forward_host" || "\$forward_host" == 127.* ]]; then forward_host=\$(hostname -I | xargs | cut -d' ' -f1); fi
+        echo "proxy will forward to \$forward_host:\$web_port"
 
         # get SSL files if needed
         if [[ "$custom_docker_domain_ssl" == "true" ]]; then
@@ -634,6 +706,7 @@ if [[ "\$tls_type" == "NPMplus" ]]; then
                         --server letsencrypt \\
                         --dns dns_evernode \\
                         --domain "\$custom_docker_domain" --force \\
+                        "\${acme_alias_args[@]}" \\
                         --accountemail "\$NPM_CERT_EMAIL" \\
                         --nocron \\
                         --noprofile \\
@@ -644,7 +717,7 @@ if [[ "\$tls_type" == "NPMplus" ]]; then
                         --fullchain-file $user_dir/$contract_dir/tls/fullchain.pem && 
                         chown -R $user:$user $user_dir/$contract_dir/tls &&
                         if [ "\$NPM_CERT_UPDATE" == "false" ]; then
-                        NPM_CERT_ADD=\$(curl -k -sS -m 100 -X POST -H "Content-Type: application/json; charset=UTF-8" -H "Authorization: Bearer \$NPM_TOKEN" -d '{"provider":"other","nice_name":"'"\$custom_docker_domain"'","domain_names":["'"\$custom_docker_domain"'"],"meta":{ }}' \$NPM_URL/api/nginx/certificates ) &&
+                        NPM_CERT_ADD=\$(curl -k -sS -m 100 -X POST -H "Content-Type: application/json; charset=UTF-8" -H "Authorization: Bearer \$NPM_TOKEN" -d '{"provider":"other","nice_name":"'"\$custom_docker_domain"'","domain_names":['"\$proxy_domain_names"'],"meta":{ }}' \$NPM_URL/api/nginx/certificates ) &&
                         NPM_CERT_ID=\$(jq -r '.id' <<< "\$NPM_CERT_ADD") &&
                         echo "created new certificate, and entry for host domain \$custom_docker_domain, ID is \$NPM_CERT_ID, now uploading to NPM+..." 
                         else echo "created new certificate, for host domain \$custom_docker_domain, updating existing NPM+ ID \$NPM_CERT_ID, now uploading to..."
@@ -661,7 +734,7 @@ if [[ "\$tls_type" == "NPMplus" ]]; then
                     if [ -z "\$custom_docker_subdomain" ]; then echo "certificate creation via DNS-01 method failed or was skipped."; fi
                     echo
                     echo "trying via NPM+ with a more standard HTTP-01 method..."
-                    NPM_CERT_ADD=\$(curl -k -s -m 100 -X POST -H "Content-Type: application/json; charset=UTF-8" -H "Authorization: Bearer \$NPM_TOKEN" -d '{"provider":"letsencrypt","nice_name":"'"\$custom_docker_domain"'","domain_names":["'"\$custom_docker_domain"'"],"meta":{"letsencrypt_email":"'"\$NPM_CERT_EMAIL"'","letsencrypt_agree":true,"dns_challenge":false}}' \$NPM_URL/api/nginx/certificates ) || echo "failed to create certificate for this evernode, this WILL cause issues. ERROR; debug: \$NPM_CERT_ADD"
+                    NPM_CERT_ADD=\$(curl -k -s -m 100 -X POST -H "Content-Type: application/json; charset=UTF-8" -H "Authorization: Bearer \$NPM_TOKEN" -d '{"provider":"letsencrypt","nice_name":"'"\$custom_docker_domain"'","domain_names":['"\$proxy_domain_names"'],"meta":{"letsencrypt_email":"'"\$NPM_CERT_EMAIL"'","letsencrypt_agree":true,"dns_challenge":false}}' \$NPM_URL/api/nginx/certificates ) || echo "failed to create certificate for this evernode, this WILL cause issues. ERROR; debug: \$NPM_CERT_ADD"
                     NPM_CERT_ID=\$(jq -r '.id' <<< "\$NPM_CERT_ADD") && echo "created new certificate for host domain \$custom_docker_domain, ID is \$NPM_CERT_ID" || echo "failed to find certificate ID, this WILL cause issues. ERROR; debug1: \$NPM_CERT_ADD debug2: \$NPM_CERT_ID"
                     if [[ -z "\$NPM_CERT_ID" || "\$NPM_CERT_ID" == "null" ]]; then
                         echo "certificate add failed via http-01 method, setting up domain with no SSL. debug_ADD:\$NPM_CERT_ADD   debug_ID:\$NPM_CERT_ID"
@@ -706,7 +779,7 @@ if [[ "\$tls_type" == "NPMplus" ]]; then
         NPM_PROXYHOSTS_ID=\$( { echo "\$NPM_PROXYHOSTS_LIST" | jq -r '.[] | select(.domain_names[] == "'"\$custom_docker_domain"'") | .id' || echo ""; } )
         if [ "\$NPM_PROXYHOSTS_ID" == "" ]; then
             echo "adding new proxy host domain \$custom_docker_domain using NPM_CERT_ID_STRING: \$NPM_CERT_ID_STRING"
-            NPM_ADD_RESPONSE=\$( { curl -k -s -m 100 -X POST -H "Content-Type: application/json; charset=UTF-8" -H "Authorization: Bearer \$NPM_TOKEN" -d '{"domain_names":["'"\${custom_docker_domain//www./}"'","www.'"\${custom_docker_domain//www./}"'"],"forward_host":"'"\$(hostname -I | xargs | cut -d' ' -f1)"'","forward_port":'"\$web_port"',"access_list_id":0'"\$NPM_CERT_ID_STRING"',"caching_enabled":0,"block_exploits":1,"advanced_config":"add_header X-Served-By '"\$EVERNODE_HOSTNAME"';","meta":{"letsencrypt_agree":true,"nginx_online":true},"allow_websocket_upgrade":1,"http2_support":0,"forward_scheme":"https","locations":[],"hsts_enabled":0,"hsts_subdomains":0}' \$NPM_URL/api/nginx/proxy-hosts || { echo "something went wrong when adding \$custom_docker_domain proxy host"; NPM_ADD_RESPONSE="error"; }; } ) 
+            NPM_ADD_RESPONSE=\$( { curl -k -s -m 100 -X POST -H "Content-Type: application/json; charset=UTF-8" -H "Authorization: Bearer \$NPM_TOKEN" -d '{"domain_names":['"\$proxy_domain_names"'],"forward_host":"'"\$forward_host"'","forward_port":'"\$web_port"',"access_list_id":0'"\$NPM_CERT_ID_STRING"',"caching_enabled":0,"block_exploits":1,"advanced_config":"add_header X-Served-By '"\$EVERNODE_HOSTNAME"';","meta":{"letsencrypt_agree":true,"nginx_online":true},"allow_websocket_upgrade":1,"http2_support":0,"forward_scheme":"https","locations":[],"hsts_enabled":0,"hsts_subdomains":0}' \$NPM_URL/api/nginx/proxy-hosts || { echo "something went wrong when adding \$custom_docker_domain proxy host"; NPM_ADD_RESPONSE="error"; }; } ) 
             NPM_ADD_RESPONSE_CHECK=\$(jq -r '.enabled // "no enabled entry"' <<< "\$NPM_ADD_RESPONSE" || echo "jq error, no json output?")
             if [[ "\$NPM_ADD_RESPONSE_CHECK" == "1" || "\$NPM_ADD_RESPONSE_CHECK" == "true" ]]; then
                 echo "added new proxy host to NPM with domain \$custom_docker_domain"
@@ -717,7 +790,7 @@ if [[ "\$tls_type" == "NPMplus" ]]; then
             fi
         elif [[ -z "\$custom_docker_subdomain" ]]; then
             echo "proxy host already on NPM domain \$custom_docker_domain, updating (using a NPM_CERT_ID_STRING: \$NPM_CERT_ID_STRING)..."
-            NPM_EDIT_RESPONSE=\$( { curl -k -s -m 100 -X PUT -H "Content-Type: application/json; charset=UTF-8" -H "Authorization: Bearer \$NPM_TOKEN" -d '{"domain_names":["'"\${custom_docker_domain//www./}"'","www.'"\${custom_docker_domain//www./}"'"],"forward_host":"'"\$(hostname -I | xargs | cut -d' ' -f1)"'","forward_port":'"\$web_port"',"access_list_id":0'"\$NPM_CERT_ID_STRING"',"caching_enabled":0,"block_exploits":1,"advanced_config":"add_header X-Served-By '"\$EVERNODE_HOSTNAME"';","meta":{"letsencrypt_agree":true,"nginx_online":true},"allow_websocket_upgrade":1,"http2_support":0,"forward_scheme":"https","locations":[],"hsts_enabled":0,"hsts_subdomains":0}' \$NPM_URL/api/nginx/proxy-hosts/\$NPM_PROXYHOSTS_ID || { echo "something went wrong when updating \$custom_docker_domain proxy host"; NPM_EDIT_RESPONSE="error"; }; })
+            NPM_EDIT_RESPONSE=\$( { curl -k -s -m 100 -X PUT -H "Content-Type: application/json; charset=UTF-8" -H "Authorization: Bearer \$NPM_TOKEN" -d '{"domain_names":['"\$proxy_domain_names"'],"forward_host":"'"\$forward_host"'","forward_port":'"\$web_port"',"access_list_id":0'"\$NPM_CERT_ID_STRING"',"caching_enabled":0,"block_exploits":1,"advanced_config":"add_header X-Served-By '"\$EVERNODE_HOSTNAME"';","meta":{"letsencrypt_agree":true,"nginx_online":true},"allow_websocket_upgrade":1,"http2_support":0,"forward_scheme":"https","locations":[],"hsts_enabled":0,"hsts_subdomains":0}' \$NPM_URL/api/nginx/proxy-hosts/\$NPM_PROXYHOSTS_ID || { echo "something went wrong when updating \$custom_docker_domain proxy host"; NPM_EDIT_RESPONSE="error"; }; })
             NPM_EDIT_RESPONSE_CHECK=\$(jq -r '.enabled // "no enabled entry"' <<< "\$NPM_EDIT_RESPONSE" || echo "jq error, no json output?")
             if [[ "\$NPM_EDIT_RESPONSE_CHECK" == "1" || "\$NPM_EDIT_RESPONSE_CHECK" == "true" ]]; then
                 echo "updated proxy host with domain \$custom_docker_domain"
