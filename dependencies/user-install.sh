@@ -38,7 +38,7 @@ script_dir=$(dirname "$(realpath "$0")")
 docker_bin=$script_dir/dockerbin
 docker_img_dir=$docker_bin/images
 docker_service="docker.service"
-docker_pull_timeout_secs=180
+docker_pull_timeout_secs=120
 cleanup_script=$user_dir/uninstall_cleanup.sh
 gp_udp_port_count=2
 gp_tcp_port_count=2
@@ -93,6 +93,27 @@ function docker_hub_repo() {
         esac
     fi
     [[ "$repo" == */* ]] && echo "$repo" || echo "library/$repo"
+}
+
+# Prints the current digest of a Docker Hub repository tag, for example "sha256:f659...". It is the same digest
+# docker records in RepoDigests on pull. Prints nothing if Docker Hub can't be reached or has no such tag.
+function docker_hub_digest() {
+    local token
+    token=$(curl -s -m 10 "${DOCKER_AUTH_URL}$1:pull" | jq -r '.token // empty')
+    [[ -n "$token" ]] || return 0
+    curl -s -m 10 --head -H "Authorization: Bearer $token" \
+        -H "Accept: application/vnd.oci.image.index.v1+json" \
+        -H "Accept: application/vnd.docker.distribution.manifest.list.v2+json" \
+        -H "Accept: application/vnd.oci.image.manifest.v1+json" \
+        -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
+        "${DOCKER_REGISTRY_URL}$1/manifests/$2" | sed -n 's/.*[Dd]ocker-[Cc]ontent-[Dd]igest: \(sha256:[a-f0-9]\{64\}\).*/\1/p'
+}
+
+# Pulls the image into the instance's docker daemon. Rolls back if the pull fails or takes longer than docker_pull_timeout_secs.
+function pull_docker_image() {
+    echo "Pulling the docker image $docker_pull_image."
+    DOCKER_HOST="$dockerd_socket" timeout --foreground -v -s SIGINT "$docker_pull_timeout_secs"s "$docker_bin"/docker pull "$docker_pull_image" || rollback "DOCKER_PULL"
+    echo "Docker image $docker_pull_image pull complete."
 }
 
 # Waits until a service becomes ready up to 3 seconds.
@@ -421,72 +442,44 @@ service_ready $docker_service || rollback "NO_DOCKERSVC"
 echo "finished Installing rootless dockerd."
 
 
-# Docker Hub repository of the image, or empty if the image is from another registry.
 hub_repo=$(docker_hub_repo "$docker_pull_image")
-
-img_local_path=$docker_img_dir/$(echo "$docker_pull_image" | tr : -)
-mkdir -p $img_local_path
-img_local_tar_path="$img_local_path.tar"
-
-# Check if the image exists locally, and if it matches dockerhubs,  also using $docker_pull_image for image name, due to any custom settings.
-if [[ ! -d "$img_local_path" ]] || [[ ! -f "${img_local_tar_path}.image_digest" ]]; then
-
-    #echo "Image $docker_image not found locally. Pulling from registry..."
-    #DOCKER_HOST="$dockerd_socket" timeout --foreground -v -s SIGINT "$docker_pull_timeout_secs"s "$docker_bin"/docker pull "$docker_image" || rollback "DOCKER_PULL"
-    #echo "image $docker_image pull complete."
-
-    echo "Image $docker_pull_image, or image hash not found locally, pulling docker image..."
-    #"$docker_bin"/download-frozen-image-v2.sh $img_local_path $docker_pull_image || rollback "DOCKER_PULL"
-    DOCKER_HOST="$dockerd_socket" "$docker_bin"/docker pull $docker_pull_image || rollback "DOCKER_PULL"
-    
-        
-    IMAGE_DIGEST=""
-    if [[ -n "$hub_repo" ]]; then
-        echo "retrieving and saving image hash(digest) to file..."
-        TOKEN=$(curl -s "${DOCKER_AUTH_URL}${hub_repo}:pull" | jq -r '.token') \
-        && IMAGE_DIGEST=$(curl -s --head -H "Authorization: Bearer $TOKEN" "${DOCKER_REGISTRY_URL}${hub_repo}/manifests/${docker_image_version}" | sed -n 's/.*[Dd]ocker-[Cc]ontent-[Dd]igest: \(sha256:[a-f0-9]*\).*/\1/p')
-    else
-        echo "image is not from Docker Hub, so there is no Docker Hub digest to save."
-    fi
-    echo "$IMAGE_DIGEST" > ${img_local_tar_path}.image_digest
-
-    echo "Saving the downloaded image as a tarball: $img_local_tar_path"
-    #tar -cvf $img_local_tar_path -C $img_local_path . || rollback "DOCKER_PULL"
-    DOCKER_HOST="$dockerd_socket" "$docker_bin"/docker save -o "$img_local_tar_path" $docker_pull_image|| rollback "DOCKER_PULL"
-    echo "docker image saved as a tarball, $img_local_tar_path"
+# Only Docker Hub images referenced by tag are cached, because only their current digest can be checked before loading
+# a cached copy. The name checks also keep the cache paths inside docker_img_dir.
+if [[ "$docker_pull_image" == *@* ]] || [[ ! "$hub_repo" =~ ^[a-z0-9]+([._-]+[a-z0-9]+)*(/[a-z0-9]+([._-]+[a-z0-9]+)*)*$ ]] || [[ ! "$docker_image_version" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]]; then
+    pull_docker_image
 else
+    img_local_tar_path="$docker_img_dir/$hub_repo/$docker_image_version.tar"
+    img_local_digest_path="$img_local_tar_path.image_digest"
+    mkdir -p "$docker_img_dir/$hub_repo"
 
-    echo "Image $docker_pull_image, already exists locally,"
-    IMAGE_DIGEST=""
-    RATE_LIMIT_REMAINING=""
-    if [[ -n "$hub_repo" ]]; then
-        TOKEN=$(curl -s "${DOCKER_AUTH_URL}${hub_repo}:pull" | jq -r '.token') \
-        && IMAGE_DIGEST=$(curl -s --head -H "Authorization: Bearer $TOKEN" "${DOCKER_REGISTRY_URL}${hub_repo}/manifests/${docker_image_version}" | sed -n 's/.*[Dd]ocker-[Cc]ontent-[Dd]igest: \(sha256:[a-f0-9]*\).*/\1/p') \
-        && RATE_LIMIT_REMAINING=$(curl -s --head -s -H "Authorization: Bearer $TOKEN" "${DOCKER_REGISTRY_URL}${hub_repo}/manifests/${docker_image_version}" | sed -n 's/.*[Rr]atelimit-remaining: \([0-9]*\).*/\1/p')
-    else
-        echo "image is not from Docker Hub, so it is not checked against Docker Hub."
-    fi
+    # Concurrent installs of the same image wait here, so they reuse one cached tarball instead of writing it together.
+    exec {img_lock_fd}>"$img_local_tar_path.lock"
+    flock "$img_lock_fd"
 
-    # Check if re-pull is needed, and we have a good amount of "remaining" rate pulls left
-    if [[ "$IMAGE_DIGEST" != "$(cat "${img_local_path}/image_digest" 2>/dev/null)" ]] && [[ "$RATE_LIMIT_REMAINING" =~ ^[0-9]+$ ]] && [[ "$RATE_LIMIT_REMAINING" -gt 60 ]]; then
-        echo "local image hash not equal to docker hub image, and rate limit is above 60 (=${RATE_LIMIT_REMAINING}), re-pulling image, and saving as tarball..."
-        #"$docker_bin"/download-frozen-image-v2.sh $img_local_path $docker_pull_image && tar -cvf $img_local_tar_path -C $img_local_path . || rollback "DOCKER_PULL"
-        DOCKER_HOST="$dockerd_socket" "$docker_bin"/docker pull $docker_pull_image || rollback "DOCKER_PULL"
-        DOCKER_HOST="$dockerd_socket" "$docker_bin"/docker save -o "$img_local_tar_path" $docker_pull_image|| rollback "DOCKER_PULL"
+    hub_digest=$(docker_hub_digest "$hub_repo" "$docker_image_version")
+    cached_digest=$(cat "$img_local_digest_path" 2>/dev/null)
+    echo "Docker Hub digest: ${hub_digest:-unknown}, cached digest: ${cached_digest:-none}."
 
-        echo "$IMAGE_DIGEST" > ${img_local_path}/image_digest
-        echo "docker image pulled, and saved as a tarball at $img_local_tar_path. and refreshed image digest record"
-    else
-        echo "Using cached image (digest unchanged, or rate limit too low/unknown to re-pull: remaining=${RATE_LIMIT_REMAINING})"
-        echo "local hash = $(cat ${img_local_path}/image_digest)"
-        echo "docker hash = ${IMAGE_DIGEST}"
-        echo "skipping image pull."
-        echo
-        echo "Loading the docker image $img_local_tar_path."
+    if [[ -n "$hub_digest" ]] && [[ "$hub_digest" == "$cached_digest" ]] && [[ -f "$img_local_tar_path" ]]; then
+        echo "Loading the cached docker image $img_local_tar_path."
         DOCKER_HOST="$dockerd_socket" "$docker_bin"/docker load -i "$img_local_tar_path" || rollback "DOCKER_PULL"
-        echo "Docker image $img_local_tar_path load complete."
-    fi
+        echo "Docker image $docker_pull_image load complete."
+    else
+        pull_docker_image
 
+        echo "Saving the docker image to the cache $img_local_tar_path."
+        rm -f "$img_local_digest_path"
+        if pulled_digest=$(DOCKER_HOST="$dockerd_socket" "$docker_bin"/docker image inspect --format '{{index .RepoDigests 0}}' "$docker_pull_image") &&
+            [[ "$pulled_digest" == *@sha256:* ]] &&
+            DOCKER_HOST="$dockerd_socket" "$docker_bin"/docker save -o "$img_local_tar_path.tmp" "$docker_pull_image" &&
+            mv "$img_local_tar_path.tmp" "$img_local_tar_path"; then
+            echo "${pulled_digest#*@}" >"$img_local_digest_path"
+        else
+            rm -f "$img_local_tar_path.tmp"
+            echo "Warning: Saving the docker image to the cache failed. The next instance will pull it again."
+        fi
+    fi
+    exec {img_lock_fd}>&-
 fi
 
 echo "making sure pulled image has both the original "version" tag, and the tag with any custom settings"

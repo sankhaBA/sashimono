@@ -105,8 +105,8 @@ Testing did not show problems because most of the risky code only runs in specia
 | M1 | IPv6 LAN rules never applied (missing table) | 🟡 Medium | Security / bug | Confirmed | Easy | ✅ Fixed |
 | M2 | LAN protection is a weak heuristic | 🟡 Medium | Security | Confirmed | Medium | ✅ Fixed |
 | M3 | `nft list ruleset > /etc/nftables.conf` overwrites host config | 🟡 Medium | Operations | Confirmed | Medium | ✅ Fixed |
-| M4 | `docker pull` has no timeout | 🟡 Medium | Reliability | Confirmed | Easy | Open |
-| M5 | Image cache and digest check is inconsistent | 🟡 Medium | Bug | Confirmed | Easy | 🟡 Partly fixed (Docker Hub URLs, see L9) |
+| M4 | `docker pull` has no timeout | 🟡 Medium | Reliability | Confirmed | Easy | ✅ Fixed |
+| M5 | Image cache and digest check is inconsistent | 🟡 Medium | Bug | Confirmed | Easy | ✅ Fixed |
 | M6 | Race conditions in the `docker_recreate` / `docker_vars` services | 🟡 Medium | Reliability | Likely | Hard | Open |
 | M7 | Tenant-writable `env.vars` is sourced in the host user's `.bashrc` | 🟡 Medium | Security | Confirmed | Easy | Open |
 | M8 | Custom image settings are not validated | 🟡 Medium | Input validation | Confirmed | Easy | Open |
@@ -278,14 +278,14 @@ Testing did not show problems because most of the risky code only runs in specia
 - **Fix:** Save only Sashimono's tables, in their own file (for example `/etc/nftables.d/sashimono-<uid>.nft`), and include that file. Or rebuild the rules at boot from the agent's database.
 - **Feasibility:** Medium.
 
-#### M4. `docker pull` has no timeout (Confirmed)
+#### M4. `docker pull` has no timeout (Confirmed), ✅ FIXED
 
 - **Where:** [user-install.sh:556](dependencies/user-install.sh#L556) and [user-install.sh:579](dependencies/user-install.sh#L579).
 - **What happens:** `docker_pull_timeout_secs=180` is defined but never used. A stuck pull, the same "frozen download" problem commit `66709f5` tried to fix, blocks `user-install.sh` forever. The agent reads its output with `popen`, so the agent waits too.
 - **Fix:** `timeout --foreground -s SIGINT "${docker_pull_timeout_secs}s" docker pull ... || rollback "DOCKER_PULL"`.
 - **Feasibility:** Easy.
 
-#### M5. Image cache and digest check is inconsistent (Confirmed), 🟡 PARTLY FIXED (Docker Hub URLs only, see the L9 fix log entry)
+#### M5. Image cache and digest check is inconsistent (Confirmed), ✅ FIXED (Docker Hub URLs in L9, the rest in M4/M5)
 
 - **Where:** [user-install.sh:543-595](dependencies/user-install.sh#L543-L595).
 - **Problems:**
@@ -715,3 +715,42 @@ Explanation: `changes/[H6, M1, M2, M3] LAN firewall (nftables) explained.md`.
 
 Explanation: `changes/[L9] Hard-coded paths, URLs and DNS servers explained.md`.
 
+
+### 2026-10-13: M4, M5 fixed (image pull timeout and image cache)
+
+- **Findings closed:** M4, and the rest of M5 (its Docker Hub URL part was fixed with L9).
+- **Files changed:** `dependencies/user-install.sh`, `installer/docker-install.sh`.
+- **What changed:**
+  - **M4.** `docker pull` now runs through a new `pull_docker_image()`, under `timeout` with `docker_pull_timeout_secs`, lowered from 180 s to 120 s (the value used before PR #415), and rolls back with `DOCKER_PULL` when it fails or times out. The Docker Hub digest requests use `curl -m 10`.
+  - **One decision path.** The two branches (each with its own digest file) are replaced by one flow:
+    - A new `docker_hub_digest()` asks Docker Hub for the tag's current digest. It replaces the two copies of the token/`HEAD` code.
+    - The cached tarball is loaded only when that digest is known **and** equals the stored one. Otherwise the image is pulled.
+    - The rate-limit gate (`ratelimit-remaining > 60`) is removed. A changed digest always means a fresh pull, so a tenant never gets an old image because the host's pull budget is low.
+  - **What is stored.** After a pull, the stored digest is the one docker itself recorded (`RepoDigests`), not the earlier `HEAD` answer. So an image pushed between the check and the pull, or a registry mirror that is behind Docker Hub, can't record a false match.
+  - **Safe save.** The old digest is removed first, the tarball is saved to `<tar>.tmp` and moved into place, and only then is the new digest written. A failed save removes the temp file, prints a warning and **continues**: the image is already in the instance's docker, so the instance doesn't need the cache. It used to roll back.
+  - **Lock.** `flock` on `<tar>.lock` (in the main shell, so `rollback`'s `exit` releases it) covers the check, pull, save and load. A second install of the same image waits, then loads the first one's tarball.
+  - **Cache layout.** Files are now `images/<docker hub repo>/<tag>.tar` (+ `.image_digest`, `.lock`):
+    - `ubuntu:22.04` and `docker.io/library/ubuntu:22.04` share one entry.
+    - `foo:bar-baz` and `foo-bar:baz` no longer map to the same file (they did with `tr : -`).
+    - Names that don't match Docker's repository/tag format skip the cache, so a tenant-supplied name like `a/../../x` can't create files outside `images/`.
+    - The empty `$img_local_path` folder and the dead `-d` check are gone.
+  - **Other registries.** Images that aren't on Docker Hub are always pulled and never cached, because their current digest can't be checked. This replaces the L9 entry's "use the cached copy, or pull". In practice nothing changes, because no tarball was ever reused for them.
+  - **Leftovers.** The commented-out pull, frozen-downloader and `tar` lines are removed. `docker-install.sh` no longer downloads `download-frozen-image-v2.sh` (unpinned, from moby `master`, unused since `66709f5`). On install and upgrade (the agent is already stopped by then) it now deletes that file and empties `dockerbin/images`, which removes the cache files of the PR #415 and Gadget layouts.
+- **Why:** the cache wrote its digest to one file and read another, could load an outdated image (low rate limit, failed check), let concurrent installs write one tarball together, and could write a digest for a tarball whose save had failed. A stuck pull froze instance creation forever. `mb-xrpl` gives up on a lease after 80% of `leaseAcquireWindow` anyway, and `mb-xrpl` handles one lease at a time (`sashiCli.wait()`), so a hang also blocked every later lease. Mainnet's `leaseAcquireWindow` is 160 s (read from the governor hook on 2026-10-13), so a lease is destroyed once creating it takes more than 128 s. A pull that is still running after 120 s can't produce a usable lease, which is why the timeout was lowered.
+- **Not changed:**
+  - The registry mirror (`docker_registry`) still isn't asked for the digest. That's safe now, because the stored digest is what was actually pulled. With a lagging mirror, the effect is a re-pull, not a stale image.
+  - Digest references (`img@sha256:...`) and registry ports in the shell's image parsing (M8). These images skip the cache.
+  - The `docker tag ${docker_pull_image} ${docker_image}` line (L4).
+- **Verified:**
+  - With stubbed `docker`/`curl`: first pull; cache hit; digest changed; Docker Hub unreachable (10 s, then pull, and the cache is refreshed with the pulled digest); save failure (warning, no temp file, no digest, the next install pulls); pull timeout (`DOCKER_PULL` rollback, lock released); mirror lag (pulled digest stored, no false match); non-Docker-Hub image and digest reference `img@sha256:...` (pull only, no files); traversal names in the repository and the tag (pull only, nothing outside `images/`); official image (`library/ubuntu/22.04.tar`); the `foo:bar-baz` / `foo-bar:baz` pair (two files).
+  - Two installs of one image at the same time: one pull and save, then the second loaded the tarball.
+  - Live Docker Hub: `docker_hub_digest()` returned the same digest docker records in `RepoDigests` for a multi-arch OCI index (`busybox:1.36`) and Evernode's single-arch image (`evernode/sashimono:hp.latest-ubt.20.04-njs.20`). It returns nothing for a missing tag.
+  - Real local docker (28.1.1): pull, `RepoDigests` read, save, then on a second run `docker load` of the cached tarball.
+  - `docker-install.sh` on a fake `dockerbin`: the cache folder and the downloader are removed, other files are kept.
+  - Pull timeout with the real docker CLI (`node:20`, timeout set to 2 s): cut off after 2 s, then `DOCKER_PULL` rollback.
+  - The agent is stopped before `docker-install.sh` runs on upgrade (`sashimono-install.sh:473-478`, then `:530`).
+  - `bash -n` passes for both scripts.
+  - `shellcheck` 0.10.0: `user-install.sh` 91 → 71 findings (warnings 4 → 3), `docker-install.sh` 17 → 15 (warnings 6 → 4). Nothing new: the only findings in the changed area are on the untouched `docker tag` lines (L4).
+  - **Not yet done:** an instance created on a real host with rootless docker 24.0.5, and a real `rollback` while the lock is held (the harness stubs `rollback`).
+
+Explanation: `changes/[M4, M5] Image pull timeout and image cache explained.md`.
