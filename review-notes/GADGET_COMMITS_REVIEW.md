@@ -107,10 +107,10 @@ Testing did not show problems because most of the risky code only runs in specia
 | M3 | `nft list ruleset > /etc/nftables.conf` overwrites host config | 🟡 Medium | Operations | Confirmed | Medium | ✅ Fixed |
 | M4 | `docker pull` has no timeout | 🟡 Medium | Reliability | Confirmed | Easy | ✅ Fixed |
 | M5 | Image cache and digest check is inconsistent | 🟡 Medium | Bug | Confirmed | Easy | ✅ Fixed |
-| M6 | Race conditions in the `docker_recreate` / `docker_vars` services | 🟡 Medium | Reliability | Likely | Hard | Open |
-| M7 | Tenant-writable `env.vars` is sourced in the host user's `.bashrc` | 🟡 Medium | Security | Confirmed | Easy | Open |
-| M8 | Custom image settings are not validated | 🟡 Medium | Input validation | Confirmed | Easy | Open |
-| M9 | Wrong or misleading values in `env.vars` | 🟡 Medium | Bug | Verified | Easy | Open |
+| M6 | Race conditions in the `docker_recreate` / `docker_vars` services | 🟡 Medium | Reliability | Likely | Hard | ✅ Fixed |
+| M7 | Tenant-writable `env.vars` is sourced in the host user's `.bashrc` | 🟡 Medium | Security | Confirmed | Easy | ✅ Fixed |
+| M8 | Custom image settings are not validated | 🟡 Medium | Input validation | Confirmed | Easy | ✅ Fixed |
+| M9 | Wrong or misleading values in `env.vars` | 🟡 Medium | Bug | Verified | Easy | ✅ Fixed |
 | M10 | Cron jobs have no random delay and a wrong schedule | 🟡 Medium | Bug | Verified | Easy | Open |
 | M11 | Certificate expiry check ignores the year | 🟡 Medium | Bug | Confirmed | Easy | Open |
 | M12 | `dns_evernode.sh` gives up after the first nameserver | 🟡 Medium | Bug | Confirmed | Easy | Open |
@@ -300,7 +300,7 @@ Testing did not show problems because most of the risky code only runs in specia
 - **Fix:** Use one digest file. Compare digests with `docker manifest inspect` or the local `RepoDigests`. Respect the registry setting. Use a lock (`flock`) around save and load.
 - **Feasibility:** Easy to Medium.
 
-#### M6. Race conditions in the `docker_recreate` / `docker_vars` services (Likely)
+#### M6. Race conditions in the `docker_recreate` / `docker_vars` services (Likely), ✅ FIXED
 
 - **Where:** [user-install.sh:1009-1038](dependencies/user-install.sh#L1009-L1038) and [user-install.sh:1062-1088](dependencies/user-install.sh#L1062-L1088).
 - **What happens:**
@@ -311,14 +311,14 @@ Testing did not show problems because most of the risky code only runs in specia
 - **Fix (proper):** Build the port mapping and `--env-file` into the agent's own `DOCKER_CREATE` command in C++. `user-install.sh` can write the parsed settings to a file that `hp_manager.cpp` reads. Then no "watch and recreate" service is needed.
 - **Feasibility:** Hard (design change), but it removes a lot of fragile code.
 
-#### M7. Tenant-writable `env.vars` is sourced in the host user's `.bashrc` (Confirmed)
+#### M7. Tenant-writable `env.vars` is sourced in the host user's `.bashrc` (Confirmed), ✅ FIXED
 
 - **Where:** [user-install.sh:338-339](dependencies/user-install.sh#L338-L339).
 - **What happens:** `.bashrc` runs `source <contract_dir>/env.vars`. That file is inside `/contract`, which the tenant can write to from the container. Anyone who opens an interactive shell as that user, such as an operator debugging with `sudo -u sashiXXX bash`, runs the **tenant's code on the host**. The `/contract/env.vars` line does nothing on the host, because that path only exists inside the container.
 - **Fix:** Remove both `source` lines.
 - **Feasibility:** Easy.
 
-#### M8. Custom image settings are not validated (Confirmed)
+#### M8. Custom image settings are not validated (Confirmed), ✅ FIXED
 
 - **Where:** [user-install.sh:208-320](dependencies/user-install.sh#L208-L320) and [hp_manager.cpp:205-208](src/hp_manager.cpp#L205-L208).
 - **What happens:**
@@ -334,7 +334,7 @@ Testing did not show problems because most of the risky code only runs in specia
   Split on the **last** `:` only.
 - **Feasibility:** Easy.
 
-#### M9. Wrong or misleading values in `env.vars` (Verified)
+#### M9. Wrong or misleading values in `env.vars` (Verified), ✅ FIXED
 
 - **Where:** [user-install.sh:917-942](dependencies/user-install.sh#L917-L942) and the quota cron at line 1005.
 - **Problems:**
@@ -755,6 +755,51 @@ Explanation: `changes/[L9] Hard-coded paths, URLs and DNS servers explained.md`.
   - **Not yet done:** an instance created on a real host with rootless docker 24.0.5, and a real `rollback` while the lock is held (the harness stubs `rollback`).
 
 Explanation: `changes/[M4, M5] Image pull timeout and image cache explained.md`.
+
+### 2026-10-14: M6, M7, M8, M9 fixed (image tag settings, container creation and env.vars)
+
+- **Findings closed:** M6, M7, M8, M9.
+- **Files changed:** `dependencies/user-install.sh`, `dependencies/user-uninstall.sh`, `src/hp_manager.cpp`, `src/hp_manager.hpp`.
+- **What changed:**
+  - **M7.** The two `source …env.vars` lines are removed from the user's `.bashrc`. The block is now the same as before Gadget's change.
+  - **M8. Parsing.** The tag settings are read and checked at the top of `user-install.sh` (lines 146-263), before the user is created. Bad input stops with `INVALID_IMAGE_SETTINGS,INST_ERR` and a log line giving the reason, with nothing to roll back.
+    - The tag is split the same way as `strip_image_settings()` in C++: after the last `:`, but only if that `:` comes after the last `/`; settings start at the first `--`; an empty version means `latest`. Registry ports (`host:5000/img`) and digest references now work, and the image pulled is always the one the agent creates the container from.
+    - Rejected: a tag with settings that is not up to 128 of `[A-Za-z0-9_.-]` (the check `docker tag` used to make by accident); a name without a value or an empty value; unknown or repeated setting names; ports that are not `1-65535` or have a leading zero; two settings using the same container port (TCP: peer, user, gptcp1, gptcp2; UDP: peer, gpudp1, gpudp2, because peer is published on both); invalid `domain` or `subdomain`; `ssl` or `contract` other than `true`/`false`; `envN` values that are not `KEY-value` with a valid key; env keys that repeat or clash with a built-in variable.
+  - **M9. `env.vars`.**
+    - Plain `KEY=value` lines, no quotes and no `$(( ))`. `RAM_QUOTA` and `DISK_QUOTA` (rounded `"…GB"` strings) are replaced by `RAM_QUOTA_BYTES` and `DISK_QUOTA_BYTES` in real bytes (KiB × 1024). `DISK_USED` and `DISK_FREE` are gone.
+    - `INTERNAL_GPTCP2_PORT` and `INTERNAL_GPUDP2_PORT` use the tenant's `gptcp2`/`gpudp2` values.
+    - The dummy `KEY1=1` … `KEY4=4` are gone. Only env keys the tenant set are added.
+    - The container gets the static variables through `--env-file`. `DISK_USED_BYTES` and `DISK_FREE_BYTES` change over time, so they are only in the contract's copy, `/contract/env.vars`. A generated `~/.docker/env_vars_update.sh` rebuilds that copy every 5 minutes. It uses `quota -w` so a long device name doesn't wrap the line, and it strips the `*` that `quota` adds over the limit.
+    - The copy is built in `~/.docker` and renamed into the contract directory with `mv -fT`. Gadget's version wrote `env.vars.tmp` inside `/contract`, where the tenant could place a symlink to `../.bashrc` and have the cron job write into it, which would have brought M7 back.
+  - **M6. The agent creates the container directly.**
+    - `user-install.sh` writes `~/.docker/container.cfg` (JSON: the six container ports and `run_contract`). `create_container()` reads it with the new `read_container_settings()`, which rejects missing, non-integer, out-of-range or zero ports and a non-boolean `run_contract`. It then runs `DOCKER_CREATE` with `external:internal` ports, `--env-file ~/.docker/env.vars`, and `run /contract` only when `run_contract` is true. The buffer length was recalculated for the new format.
+    - `docker_recreate.sh`, `docker_recreate.service`, `docker_vars.service` and the `docker tag ${docker_pull_image} ${docker_image}` alias are removed. The container is no longer stopped, removed and recreated after the agent creates it, and it is no longer started before `initiate`, as before Gadget's change.
+    - The remaining work of the old watchers needs the contract directory, which only exists after `create_contract()`. It moved into a oneshot user unit, `instance_setup.service` (oneshot units have no start timeout by default, checked on systemd 245): it runs `env_vars_update.sh` and, on NPMplus hosts, the first `domain_ssl_update.sh`. The agent starts it with `systemctl --user start --no-block` right after `docker create` (`start_instance_setup()`), because the domain setup can take minutes. The unit is not enabled, so it doesn't run again at boot.
+    - Both cron jobs (env.vars every 5 minutes, and the weekly `domain_ssl_update.sh` line, unchanged) are installed directly by `user-install.sh` with `crontab -u`. A failure prints a warning, as before.
+    - `user-uninstall.sh` stops `instance_setup.service` and removes the user's crontab itself, instead of the `crontab -u <user> -r` line in the tenant-owned cleanup script (H4).
+  - **Behaviour changes.**
+    - Every container gets `--env-file`, not only containers with tag settings.
+    - Settings that used to be ignored or half-applied now fail the install. The tenant only sees `user_install_error`; the reason is in the sagent log.
+    - `--contract--false` on its own now runs the image's own command. Before, it was ignored, so `run /contract` was kept.
+    - The domain setup runs under the same conditions as before (NPMplus host, and tag settings or a non-`reputation` image). The custom-settings path no longer installs a weekly cron for a `domain_ssl_update.sh` that doesn't exist on non-NPMplus hosts.
+- **Why:** the old watchers only did their work if they caught the first `docker create` event, so a slow start silently left an instance without ports, env.vars, cron jobs or a domain. They also stopped and removed the container while the agent might be starting it. Tenant values went unchecked into arithmetic, generated scripts and commands. `env.vars` gave the container quoted, unexpanded and wrongly-named values, and the operator's shell ran tenant code.
+- **Not changed:**
+  - Gadget's code was never released, so only dev/test hosts can have the old `.bashrc` lines, watcher units or crontab entries. On those, uninstall still deletes the user's home and kills its processes. The old watcher units are no longer stopped by name.
+  - Any tag setting without `contract=true` still makes the container run the image's own command (Gadget's rule). The HotPocket image has entrypoint `hpcore` and no default command (checked with `docker inspect` on `evernode/sashimono:hp.latest-ubt.20.04-njs.20`), so a HotPocket tenant who adds only, say, `--env1--FOO-bar` gets an instance that doesn't run its contract. With `contract=true`, a remapped `user` or `peer` port still points at a port HotPocket doesn't listen on, because `hp.cfg` uses the host ports. Both are left for the domain/image-settings design review.
+  - `domain_ssl_update.sh` also writes into the contract directory (`tls/`, the copied log), so the same symlink concern applies there. Left for the domain review (C3, C4, H1).
+  - The weekly cron schedule and its random delay (M10).
+  - This closes the M5 entry's open items: the registry port and digest parsing (M8), and the `docker tag` line (part of L4).
+- **Verified:**
+  - `sagent` builds. Rendered with the real format string: the `docker create` command with and without `run /contract`, and the buffer length with 5-digit ports (721 bytes for 678 needed).
+  - jsoncons: `is<uint16_t>()` rejects 70000, -1, `"8080"`, 1.5, `true`, `null` and a missing key; 0 is rejected by the extra check.
+  - The parsing block, run on its own: 15 valid tags (with and without tag, registry port, digest, `image:--subdomain--x` → `latest`, every setting type, the same port on TCP and UDP) and 26 invalid ones, each with the expected message.
+  - With stubs: rendered `env.vars`, `env_vars_update.sh`, `container.cfg` (valid JSON), `instance_setup.service` (passes `systemd-analyze verify`) and the crontab. The weekly line is the same text the old service produced. Domain on/off for 4 host and image combinations matches the old conditions.
+  - `env_vars_update.sh` with a stubbed `quota`: normal usage, `51234*` over the limit, no quota line. A symlink planted at `env.vars` or `env.vars.tmp` leaves `.bashrc` untouched, and a directory planted at `env.vars` fails without leaving a temp file.
+  - Real local docker (28.1.1): `docker create` with the rendered arguments and generated env file. All 7 bindings (peer on TCP and UDP, `26201→8080`), `API_KEY=a b$c` unchanged in `Config.Env`, and `Cmd` empty or `run /contract` as set. The test containers were removed.
+  - `bash -n` passes. `shellcheck` 0.10.0: `user-install.sh` 71 → 60 findings (warnings 4 → 2), `user-uninstall.sh` unchanged at 22, the generated `env_vars_update.sh` 0. Nothing new.
+  - **Not yet done:** real instances on a test host (plain HotPocket, custom ports and env, `contract=true`, an NPMplus domain), a lease destroy, and a rollback.
+
+Explanation: `changes/[M6, M7, M8, M9] Image tag settings and env.vars explained.md`.
 
 ### 2026-10-14: L4 partly fixed (unused `ctx.dns_evernode_sh` removed)
 

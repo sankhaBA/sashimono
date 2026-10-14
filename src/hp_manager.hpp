@@ -35,6 +35,18 @@ namespace hp
         }
     };
 
+    // Container side ports and command of an instance, written by user-install.sh from the tenant's image tag settings.
+    struct container_settings
+    {
+        uint16_t peer_port = 0;
+        uint16_t user_port = 0;
+        uint16_t gp_tcp_port_1 = 0;
+        uint16_t gp_tcp_port_2 = 0;
+        uint16_t gp_udp_port_1 = 0;
+        uint16_t gp_udp_port_2 = 0;
+        bool run_contract = true;
+    };
+
     struct instance_info
     {
         std::string owner_pubkey;
@@ -78,6 +90,10 @@ namespace hp
     int initiate_instance(std::string &error_msg, std::string_view container_name, const msg::initiate_msg &config_msg);
 
     int create_container(std::string_view username, std::string_view image_name, std::string_view container_name, std::string_view contract_dir, const ports &assigned_ports, instance_info &info);
+
+    int read_container_settings(std::string_view username, container_settings &settings);
+
+    int start_instance_setup(std::string_view username);
 
     int start_container(std::string_view container_name);
 

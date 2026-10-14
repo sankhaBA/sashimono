@@ -142,6 +142,126 @@ function wait_for_dockerd() {
     done
 }
 
+# Stops the installation because of an invalid setting in the image tag. Nothing is created yet, so there is nothing to roll back.
+function image_settings_error() {
+    echo "Invalid image tag settings in '$docker_image'. $1"
+    echo "INVALID_IMAGE_SETTINGS,INST_ERR" && exit 1
+}
+
+# Read the tenant's settings from the image tag, for example "image:v1--user--8080--env1--KEY-value".
+# The tag is split the same way as strip_image_settings() in hp_manager.cpp, so the image pulled here is the one the agent creates the container from.
+docker_pull_image="$docker_image"
+docker_image_version="latest"
+image_settings=()
+if [[ "${docker_image##*/}" == *:* ]]; then
+    docker_image_tag="${docker_image##*:}"
+    docker_image_version="$docker_image_tag"
+    if [[ "$docker_image_tag" == *--* ]]; then
+        [[ "$docker_image_tag" =~ ^[A-Za-z0-9_.-]{1,128}$ ]] || image_settings_error "A tag can only have up to 128 letters, digits, '_', '.' and '-'."
+        docker_image_version="${docker_image_tag%%--*}"
+        docker_image_version="${docker_image_version:-latest}"
+        docker_pull_image="${docker_image%:*}:$docker_image_version"
+        docker_image_settings="${docker_image_tag#*--}"
+        readarray -t image_settings <<<"${docker_image_settings//--/$'\n'}"
+    fi
+fi
+
+[[ ${#image_settings[@]} -gt 0 ]] && custom_docker_settings=true || custom_docker_settings=false
+custom_docker_domain=""
+custom_docker_subdomain=""
+custom_docker_domain_ssl="true"
+run_contract=""
+internal_peer_port="$peer_port"
+internal_user_port="$user_port"
+internal_gptcp1_port="$gp_tcp_port_start"
+internal_gpudp1_port="$gp_udp_port_start"
+internal_gptcp2_port=$((gp_tcp_port_start + 1))
+internal_gpudp2_port=$((gp_udp_port_start + 1))
+tenant_env_vars=()
+declare -A found_image_settings
+domain_label_regex='[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?'
+for ((i = 0; i < ${#image_settings[@]}; i += 2)); do
+    setting_name="${image_settings[i]}"
+    setting_value="${image_settings[i + 1]}"
+    [[ -n "$setting_name" && -n "$setting_value" ]] || image_settings_error "Each setting needs a name and a value, separated by '--'."
+    [[ -z "${found_image_settings[$setting_name]}" ]] || image_settings_error "The setting '$setting_name' is given more than once."
+    found_image_settings[$setting_name]=1
+    echo "Found image setting '$setting_name' with value '$setting_value'."
+    case "$setting_name" in
+    domain)
+        [[ "$setting_value" =~ ^($domain_label_regex\.)+[A-Za-z]{2,63}$ ]] || image_settings_error "'$setting_value' is not a valid domain."
+        custom_docker_domain="$setting_value"
+        ;;
+    subdomain)
+        [[ "$setting_value" =~ ^$domain_label_regex$ ]] || image_settings_error "'$setting_value' is not a valid subdomain."
+        custom_docker_subdomain="$setting_value"
+        ;;
+    ssl | contract)
+        [[ "$setting_value" == "true" || "$setting_value" == "false" ]] || image_settings_error "The value of '$setting_name' must be 'true' or 'false'."
+        if [[ "$setting_name" == "ssl" ]]; then custom_docker_domain_ssl="$setting_value"; else run_contract="$setting_value"; fi
+        ;;
+    peer | user | gptcp1 | gpudp1 | gptcp2 | gpudp2)
+        if [[ ! "$setting_value" =~ ^[1-9][0-9]{0,4}$ ]] || [ "$setting_value" -gt 65535 ]; then
+            image_settings_error "The '$setting_name' port must be a number from 1 to 65535."
+        fi
+        # Sets internal_peer_port, internal_user_port, internal_gptcp1_port, etc.
+        printf -v "internal_${setting_name}_port" '%s' "$setting_value"
+        ;;
+    env[1-4])
+        # Value format is KEY-value. "__" becomes a space and ".." becomes "$".
+        env_key="${setting_value%%-*}"
+        [[ "$setting_value" == *-* && "$env_key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || image_settings_error "The value of '$setting_name' must be KEY-value, where KEY has only letters, digits and '_' and does not start with a digit."
+        env_value="${setting_value#*-}"
+        env_value="${env_value//__/ }"
+        env_value="${env_value//../$}"
+        tenant_env_vars+=("$env_key=$env_value")
+        ;;
+    *)
+        image_settings_error "Unknown setting '$setting_name'."
+        ;;
+    esac
+done
+
+# The peer port is published for both TCP and UDP, so it can't share a container port with any other setting of either protocol.
+duplicate_port=$(printf '%s\n' "$internal_peer_port" "$internal_user_port" "$internal_gptcp1_port" "$internal_gptcp2_port" | sort | uniq -d | head -1)
+[[ -z "$duplicate_port" ]] || image_settings_error "The container port $duplicate_port is used by more than one of peer, user, gptcp1 and gptcp2."
+duplicate_port=$(printf '%s\n' "$internal_peer_port" "$internal_gpudp1_port" "$internal_gpudp2_port" | sort | uniq -d | head -1)
+[[ -z "$duplicate_port" ]] || image_settings_error "The container port $duplicate_port is used by more than one of peer, gpudp1 and gpudp2."
+
+# Without settings the container runs the HotPocket contract. With settings it runs the image's own command, unless "contract" is "true".
+[[ -n "$run_contract" ]] || run_contract=$([[ "$custom_docker_settings" == "true" ]] && echo false || echo true)
+
+instance_domain="$custom_docker_domain"
+[[ -n "$custom_docker_subdomain" ]] && instance_domain="$custom_docker_subdomain.${EVERNODE_HOSTNAME#*.}"
+[[ -z "$instance_domain" ]] && instance_domain="${EVERNODE_HOSTNAME%%.*}-${user_port: -1}.${EVERNODE_HOSTNAME#*.}"
+
+# Environment variables given to the container with --env-file. docker reads each line as plain KEY=value, without quotes or expansion.
+# The current disk usage is only added to the contract's copy of the file (see env_vars_update.sh).
+env_vars="HOST_DOMAIN_ADDRESS=$EVERNODE_HOSTNAME
+CUSTOM_DOMAIN_ADDRESS=$instance_domain
+RAM_QUOTA_BYTES=$((memory * 1024))
+DISK_QUOTA_BYTES=$((disk * 1024))
+EXTERNAL_PEER_PORT=$peer_port
+INTERNAL_PEER_PORT=$internal_peer_port
+EXTERNAL_USER_PORT=$user_port
+INTERNAL_USER_PORT=$internal_user_port
+EXTERNAL_GPTCP1_PORT=$gp_tcp_port_start
+INTERNAL_GPTCP1_PORT=$internal_gptcp1_port
+EXTERNAL_GPUDP1_PORT=$gp_udp_port_start
+INTERNAL_GPUDP1_PORT=$internal_gpudp1_port
+EXTERNAL_GPTCP2_PORT=$((gp_tcp_port_start + 1))
+INTERNAL_GPTCP2_PORT=$internal_gptcp2_port
+EXTERNAL_GPUDP2_PORT=$((gp_udp_port_start + 1))
+INTERNAL_GPUDP2_PORT=$internal_gpudp2_port"
+for tenant_env_var in "${tenant_env_vars[@]}"; do
+    env_key="${tenant_env_var%%=*}"
+    if [[ "$env_key" =~ ^DISK_(USED|FREE)_BYTES$ ]] || grep -q "^$env_key=" <<<"$env_vars"; then
+        image_settings_error "The environment variable '$env_key' is already set."
+    fi
+    env_vars="$env_vars
+$tenant_env_var"
+done
+
 nofile_soft_limit=$(ulimit -n -S)
 if [ $nofile_soft_limit -lt 250000 ]; then 
     ulimit -n 250000
@@ -205,99 +325,11 @@ if [[ "$(quotaon -p / | grep group | awk '{print $7}')" == "off" ]]; then
 fi
 setquota -g -F vfsv0 "$user" "$disk" "$disk" 0 0 / && echo "Configured disk quota of $disk for the user $user" || echo "Configuring disk quota failed"
 
-# Extract additional port settings if present, 1st it splits everything after :, then replaces all -- with  |, and uses that to create an array
-echo
-echo "# checking for any additional port config within image name $docker_image"
-IFS='|' read -r -a image_array <<< "$( echo $docker_image | cut -d':' -f2 | sed 's/--/|/g' )"
-echo "captured additional docker settings, ${image_array[@]}"
-if [[ "$docker_image" == *":"* ]]; then
-    docker_image_version="${image_array[0]:-latest}"
-else
-    docker_image_version="latest"
-fi
-custom_docker_settings=false
-custom_docker_domain=""
-custom_docker_subdomain=""
-custom_docker_domain_ssl="true"
-internal_peer_port="$peer_port"
-internal_user_port="$user_port"
-internal_gptcp1_port="$gp_tcp_port_start"
-internal_gpudp1_port="$gp_udp_port_start"
-internal_gptcp2_port=$((gp_tcp_port_start + 1))
-internal_gpudp2_port=$((gp_udp_port_start + 1))
-internal_run_contract=""
-internal_env1_key="KEY1"
-internal_env1_value="1"
-internal_env2_key="KEY2"
-internal_env2_value="2"
-internal_env3_key="KEY3"
-internal_env3_value="3"
-internal_env4_key="KEY4"
-internal_env4_value="4"
-
-# Loop through the array to extract pairs
-for ((i = 1; i < ${#image_array[@]}; i += 2)); do
-    image_array_name="${image_array[i]}"
-    image_array_value="${image_array[i + 1]}"
-    echo "found additional setting, name: \"$image_array_name\"    value: \"$image_array_value\""
-    case "$image_array_name" in
-        domain)
-            custom_docker_settings="true"
-            custom_docker_domain=$image_array_value
-            ;;
-        subdomain)
-            custom_docker_settings="true"
-            custom_docker_subdomain=$image_array_value
-            ;;
-        ssl)
-            custom_docker_settings="true"
-            if [[ "$image_array_value" == "false" ]]; then custom_docker_domain_ssl="false"; fi
-            ;;
-        peer | user | gptcp1 | gpudp1 | gptcp2 | gpudp2)
-            # Sets internal_peer_port, internal_user_port, internal_gptcp1_port, etc.
-            custom_docker_settings="true"
-            printf -v "internal_${image_array_name}_port" '%s' "$image_array_value"
-            ;;
-        contract)
-            if [[ "$image_array_value" == "true" ]]; then
-                custom_docker_settings="true"
-                internal_run_contract="run /contract"
-                echo "found contract command, enabling \"run /contract\""
-            fi
-            ;;
-        env[1-4])
-            # Value format is KEY-value. "__" becomes a space and ".." becomes "$".
-            # Sets internal_env<N>_key and internal_env<N>_value.
-            custom_docker_settings="true"
-            env_key=$(echo "$image_array_value" | cut -d'-' -f1)
-            env_value=${image_array_value#*-}
-            env_value=${env_value//__/ }
-            env_value=${env_value//../$}
-            printf -v "internal_${image_array_name}_key" '%s' "$env_key"
-            printf -v "internal_${image_array_name}_value" '%s' "$env_value"
-            echo "found $image_array_name, key>$env_key value>$env_value"
-            ;;
-    esac
-done
-
-# adjust docker_pull_image, and set a "default" custom_docker_image, only if custom settings have been detected
-if [[ "$custom_docker_settings" == "true" ]]; then
-    docker_pull_image="$(echo "$docker_image" | cut -d':' -f1):${docker_image_version}"
-    echo "all additional port/custom settings found and saved, will be using a pull image of $docker_pull_image"
-    echo
-else
-    docker_pull_image="$docker_image"
-    echo "no additional port/custom settings found in image tag"
-    echo
-fi
-
 # Setup env variables for the user.
 echo "
 export XDG_RUNTIME_DIR=$user_runtime_dir
 export PATH=$docker_bin:\$PATH
-export DOCKER_HOST=$dockerd_socket
-[ -f \"/contract/env.vars\" ] && source /contract/env.vars
-[ -f \"$user_dir/$contract_dir/env.vars\" ] && source $user_dir/$contract_dir/env.vars"  >>"$user_dir"/.bashrc
+export DOCKER_HOST=$dockerd_socket" >>"$user_dir"/.bashrc
 echo "Updated user .bashrc."
 
 # Wait until user systemd is functioning.
@@ -482,13 +514,7 @@ else
     exec {img_lock_fd}>&-
 fi
 
-echo "making sure pulled image has both the original "version" tag, and the tag with any custom settings"
-DOCKER_HOST="$dockerd_socket" "$docker_bin"/docker tag ${docker_pull_image} ${docker_image} || rollback "DOCKER_PULL"
-echo "Docker tag update complete, full image >$docker_image, original pulled image >$docker_pull_image"
-echo
-
-
-echo "Adding hpfs mounts, and depending on instance options, docker_recreate or docker_vars services."
+echo "Adding hpfs services for the instance."
 
 echo "[Unit]
 Description=Running and monitoring contract fs.
@@ -815,181 +841,55 @@ chmod +x $user_dir/.docker/domain_ssl_update.sh
 chown $user:$user $user_dir/.docker/domain_ssl_update.sh
 fi
 
+echo "$env_vars" >"$user_dir"/.docker/env.vars
 
-
-if [[ -n "$custom_docker_subdomain" ]]; then
-    custom_docker_domain="$custom_docker_subdomain.${EVERNODE_HOSTNAME#*.}"
-    echo "subdomain request detected, assigning domain as $custom_docker_domain"
-fi
-if [[ -z "$custom_docker_domain" ]]; then
-    instance_slot=${user_port: -1}
-    custom_docker_domain="${EVERNODE_HOSTNAME%%.*}-${instance_slot}.${EVERNODE_HOSTNAME#*.}"
-    custom_docker_subdomain="${custom_docker_domain%%.*}"
-    echo "no custom domain settings found, setting up a default route of, $custom_docker_domain"
-fi
-
-cat > $user_dir/.docker/env.vars <<EOF 
-HOST_DOMAIN_ADDRESS=$(jq -r ".hp.host_address | select( . != null )" "$SA_CONFIG")
-CUSTOM_DOMAIN_ADDRESS=$custom_docker_domain
-RAM_QUOTA="$(( memory / 1024 / 1024 ))GB"
-DISK_QUOTA="$(( disk / 1024 / 1024 ))GB"
-DISK_QUOTA_BYTES=$disk
-DISK_USED_BYTES=""
-DISK_USED="\$(( DISK_USED_BYTES / 1024 / 1024 ))GB"
-DISK_FREE="\$(( ( DISK_QUOTA_BYTES - DISK_USED_BYTES ) / 1024 / 1024 ))GB"
-EXTERNAL_PEER_PORT=$peer_port
-INTERNAL_PEER_PORT=$internal_peer_port
-EXTERNAL_USER_PORT=$user_port
-INTERNAL_USER_PORT=$internal_user_port
-EXTERNAL_GPTCP1_PORT=$gp_tcp_port_start
-INTERNAL_GPTCP1_PORT=$internal_gptcp1_port
-EXTERNAL_GPUDP1_PORT=$gp_udp_port_start
-INTERNAL_GPUDP1_PORT=$internal_gpudp1_port
-EXTERNAL_GPTCP2_PORT=$((gp_tcp_port_start + 1))
-INTERNAL_GPTCP2_PORT=$((internal_gptcp1_port + 1))
-EXTERNAL_GPUDP2_PORT=$((gp_udp_port_start + 1))
-INTERNAL_GPUDP2_PORT=$((internal_gpudp1_port + 1))
-$internal_env1_key=$internal_env1_value
-$internal_env2_key=$internal_env2_value
-$internal_env3_key=$internal_env3_value
-$internal_env4_key=$internal_env4_value
-EOF
-
-# Cron job that writes the instance's current disk usage into env.vars every 5 minutes. Used by both watcher services below.
-quota_crontab_awk_cmd="awk ''\'NR==3 {print \\\\\$2}''\'"
-quota_crontab_sed_cmd='sed \\"s/^DISK_USED_BYTES=.*/DISK_USED_BYTES=\\$USED_BYTES/\\"'
-quota_crontab_entry='echo "*/5 * * * * USED_BYTES=\\$(quota -g '${user}' 2>/dev/null | '${quota_crontab_awk_cmd}' || echo \\"0\\") && '${quota_crontab_sed_cmd}' \\"'${user_dir}'/'${contract_dir}'/env.vars\\" > \\"'${user_dir}'/'${contract_dir}'/env.vars.tmp\\" && [ -s '${user_dir}'/'${contract_dir}'/env.vars.tmp ] && mv \\"'${user_dir}'/'${contract_dir}'/env.vars.tmp\\" \\"'${user_dir}'/'${contract_dir}'/env.vars\\"" | crontab -'
-
-# if there is any extra docker setting requested, build and setup re-create script and a service to start it.
-if [[ "$custom_docker_settings" == "true" ]]; then
-    echo "user custom docker settings detected, building docker re-create script and service"
-    watcher_service="docker_recreate.service"
-
-cat > "$user_dir"/.docker/docker_recreate.sh <<EOF
+# Rebuilds the contract's env.vars from the instance's variables and its current disk usage. Run by instance_setup.service and every 5 minutes by cron.
+# quota prints sizes in KiB, with a '*' after the number once the limit is reached. -w keeps a long device name from wrapping the line.
+# The file is built outside the contract directory and renamed into it, because the tenant can place symlinks there.
+cat >"$user_dir"/.docker/env_vars_update.sh <<EOF
 #!/bin/bash
-CONTAINER_NAME=\$(${docker_bin}/docker ps -a --format "{{.Names}}" | head -n 1)
-if [[ -z "\$CONTAINER_NAME" ]]; then echo "unable to obtain the container name >\$CONTAINER_NAME"; exit 1;fi
-
-TIMEOUT_SECONDS=180
-INSPECT_DATA=\$(${docker_bin}/docker inspect \$CONTAINER_NAME)
-PORTS=\$(echo \$INSPECT_DATA | jq -r '.[0].HostConfig.PortBindings')
-MOUNT_SOURCE=\$(echo \$INSPECT_DATA | jq -r '.[0].HostConfig.Mounts[0].Source')
-MOUNT_TARGET=\$(echo \$INSPECT_DATA | jq -r '.[0].HostConfig.Mounts[0].Target')
-IMAGE=\$(echo \$INSPECT_DATA | jq -r '.[0].Config.Image')
-
-# Set Docker configs
-export DOCKER_HOST="unix://${user_runtime_dir}/docker.sock"
-
-# Build the docker create command
-docker_create_command="timeout --foreground -v -s SIGINT \${TIMEOUT_SECONDS}s ${docker_bin}/docker create -t -i --stop-signal=SIGINT --log-driver local --log-opt max-size=5m --log-opt max-file=2 --name=\${CONTAINER_NAME}"
-
-# Set the ports
-for port in \$(echo \$PORTS | jq -r 'to_entries | .[] | .key'); do
-    external_port=\$(echo \$PORTS | jq -r ".\\"\$port\\"[0].HostPort")
-    internal_port=\$port
-    if [[ "${peer_port}" == "\$external_port" ]]; then internal_port="${internal_peer_port}/\${port#*/}"; fi
-    if [[ "${user_port}" == "\$external_port" ]]; then internal_port="${internal_user_port}/\${port#*/}"; fi
-    if [[ "${gp_tcp_port_start}" == "\$external_port" ]]; then internal_port="${internal_gptcp1_port}/\${port#*/}"; fi
-    if [[ "${gp_udp_port_start}" == "\$external_port" ]]; then internal_port="${internal_gpudp1_port}/\${port#*/}"; fi
-    if [[ "$((gp_tcp_port_start + 1))" == "\$external_port" ]]; then internal_port="${internal_gptcp2_port}/\${port#*/}"; fi
-    if [[ "$((gp_udp_port_start + 1))" == "\$external_port" ]]; then internal_port="${internal_gpudp2_port}/\${port#*/}"; fi
-    echo "EXTERNAL \$external_port     INTERNAL \$internal_port"
-    docker_create_command="\$docker_create_command -p \$external_port:\$internal_port"
-done
-
-# Add Environment variables
-docker_create_command="\$docker_create_command --env-file $user_dir/.docker/env.vars"
-
-# Add restart policy
-docker_create_command="\$docker_create_command --restart unless-stopped"
-
-# Add volume binding
-docker_create_command="\$docker_create_command --mount type=bind,source=\${MOUNT_SOURCE},target=\${MOUNT_TARGET}"
-
-# handle original container, and service
-${docker_bin}/docker stop \$CONTAINER_NAME
-${docker_bin}/docker rm \$CONTAINER_NAME
-
-# Execute the docker create command
-echo "docker_create_command built lets run >\$docker_create_command "
-\$docker_create_command \${IMAGE} $internal_run_contract
-${docker_bin}/docker start \$CONTAINER_NAME
+disk_used_kb=\$(quota -g -w $user 2>/dev/null | awk 'NR == 3 {sub(/\*\$/, "", \$2); print \$2}')
+[[ "\$disk_used_kb" =~ ^[0-9]+\$ ]] || disk_used_kb=0
+tmp_file=\$(mktemp $user_dir/.docker/env.vars.XXXXXX) || exit 1
+{
+    cat $user_dir/.docker/env.vars &&
+        echo "DISK_USED_BYTES=\$((disk_used_kb * 1024))" &&
+        echo "DISK_FREE_BYTES=\$((($disk - disk_used_kb) * 1024))"
+} >"\$tmp_file" && chmod 644 "\$tmp_file" && mv -fT "\$tmp_file" $user_dir/$contract_dir/env.vars
+rm -f "\$tmp_file"
 EOF
-chmod +x "$user_dir"/.docker/docker_recreate.sh
 
-domain_ssl_update_1='(crontab -l 2>/dev/null; echo "0 0 */7 * * sleep \\$((RANDOM*3540/32768)) && /usr/bin/bash '${user_dir}'/.docker/domain_ssl_update.sh 2>&1 | tee -a '${user_dir}'/.docker/domain_ssl_update.log") | crontab -'
-domain_ssl_update_2='bash "'${user_dir}'/.docker/domain_ssl_update.sh" 2>&1 | tee -a '${user_dir}'/.docker/domain_ssl_update.log'
+# Container side settings read by the agent (create_container() in hp_manager.cpp) to build the docker create command.
+echo "{
+    \"peer_port\": $internal_peer_port,
+    \"user_port\": $internal_user_port,
+    \"gp_tcp_port_1\": $internal_gptcp1_port,
+    \"gp_tcp_port_2\": $internal_gptcp2_port,
+    \"gp_udp_port_1\": $internal_gpudp1_port,
+    \"gp_udp_port_2\": $internal_gpudp2_port,
+    \"run_contract\": $run_contract
+}" >"$user_dir"/.docker/container.cfg
 
-cat > "$user_dir"/.config/systemd/user/docker_recreate.service <<EOF
-[Unit]
-Description=Docker Create Event Watcher
-After=docker.service
-Requires=docker.service
+domain_setup=false
+[[ "$TLS_TYPE" == "NPMplus" ]] && [[ "$custom_docker_settings" == "true" || "$docker_pull_image" != *reputation* ]] && domain_setup=true
 
+# Started once by the agent right after it creates the container, because the contract directory only exists from then on.
+# It is not enabled, so it does not run again at boot.
+echo "Adding the instance setup service."
+{
+    echo "[Unit]
+Description=Instance setup after the contract is created.
 [Service]
-Type=simple
-Restart=on-failure
-ExecStart=/bin/bash -c ' \\
-  ${docker_bin}/docker events --filter event=create | \\
-  while read -r create_event; do \\
-    echo "Handling event: \${create_event}" >> "${user_dir}/.docker/docker_recreate.log"; \\
-    bash "${user_dir}/.docker/docker_recreate.sh" 2>&1 | tee -a ${user_dir}/.docker/docker_recreate.log; \\
-    cp ${user_dir}/.docker/env.vars ${user_dir}/${contract_dir}/env.vars; \\
-    ${quota_crontab_entry}; \\
-    ${domain_ssl_update_1}; \\
-    ${domain_ssl_update_2}; \\
-    break; \\
-  done'
-SuccessExitStatus=0 143
-
-[Install]
-WantedBy=default.target
-EOF
-
-else
-    echo "no user custom docker settings detected, only adding env.vars file and quota system."
-    watcher_service="docker_vars.service"
-    echo "no custom port or other user settings found. setting up recreate service to copy .vars file and default domain-forwarding/proxy-host"
-    if [[ "$TLS_TYPE" == "NPMplus" ]] && [[ "$docker_pull_image" != *"reputation"* ]]; then
-        domain_ssl_update_1='(crontab -l 2>/dev/null; echo "0 0 */7 * * sleep \\$((RANDOM*3540/32768)) && /usr/bin/bash '${user_dir}'/.docker/domain_ssl_update.sh 2>&1 | tee -a '${user_dir}'/.docker/domain_ssl_update.log") | crontab -'
-        domain_ssl_update_2='bash "'${user_dir}'/.docker/domain_ssl_update.sh" 2>&1 | tee -a '${user_dir}'/.docker/domain_ssl_update.log'
-    else
-        domain_ssl_update_1='echo "NPMplus NOT installed on host,"'
-        domain_ssl_update_2='echo "or reputation contract detected."'
-    fi
-
-# set up a service to copy in the .vars file AFTER docker has created the original container. (as container/image needs to be created, before we can copy it in)
-cat > "$user_dir"/.config/systemd/user/docker_vars.service <<EOF
-[Unit]
-Description=Docker env.vars file setup, and proxy support.
-After=docker.service
-Requires=docker.service
-
-[Service]
-Type=simple
-Restart=on-failure
-ExecStart=/bin/bash -c ' \\
-  ${docker_bin}/docker events --filter event=create | \\
-  while read -r create_event; do \\
-    cp "${user_dir}/.docker/env.vars" "${user_dir}/${contract_dir}/env.vars"; \\
-    ${quota_crontab_entry}; \\
-    ${domain_ssl_update_1}; \\
-    ${domain_ssl_update_2}; \\
-    break; \\
-  done'
-SuccessExitStatus=0 143
-
-[Install]
-WantedBy=default.target
-EOF
-
-fi
-
-# Start the watcher service, and register its cleanup for uninstall.
+Type=oneshot
+ExecStart=-/bin/bash $user_dir/.docker/env_vars_update.sh"
+    [[ "$domain_setup" == "true" ]] && echo "ExecStart=/bin/bash -c '/bin/bash $user_dir/.docker/domain_ssl_update.sh 2>&1 | tee -a $user_dir/.docker/domain_ssl_update.log'"
+} >"$user_dir"/.config/systemd/user/instance_setup.service
 sudo -u "$user" XDG_RUNTIME_DIR="$user_runtime_dir" systemctl --user daemon-reload
-sudo -u "$user" XDG_RUNTIME_DIR="$user_runtime_dir" systemctl --user enable "$watcher_service"
-sudo -u "$user" XDG_RUNTIME_DIR="$user_runtime_dir" systemctl --user start "$watcher_service"
-echo "crontab -u $user -r" >>$cleanup_script
+
+{
+    echo "*/5 * * * * /bin/bash $user_dir/.docker/env_vars_update.sh"
+    [[ "$domain_setup" == "true" ]] && echo "0 0 */7 * * sleep \$((RANDOM*3540/32768)) && /usr/bin/bash $user_dir/.docker/domain_ssl_update.sh 2>&1 | tee -a $user_dir/.docker/domain_ssl_update.log"
+} | crontab -u "$user" - || echo "Warning: Adding the cron jobs of the instance failed."
 echo "cat $user_dir/.docker/domain_ssl_update.log >> /root/domain_ssl_update.log" >>$cleanup_script
 chown -R $user:$user $cleanup_script
 

@@ -57,13 +57,13 @@ sudo -u "$user" XDG_RUNTIME_DIR="$user_runtime_dir" systemctl --user stop "$ledg
 sudo -u "$user" XDG_RUNTIME_DIR="$user_runtime_dir" systemctl --user disable "$contract_fs_service"
 sudo -u "$user" XDG_RUNTIME_DIR="$user_runtime_dir" systemctl --user disable "$ledger_fs_service"
 
-for watcher_service in docker_recreate.service docker_vars.service; do
-    if [ -f "$user_dir/.config/systemd/user/$watcher_service" ]; then
-        echo "Stopping and disabling $watcher_service."
-        sudo -u "$user" XDG_RUNTIME_DIR="$user_runtime_dir" systemctl --user stop "$watcher_service"
-        sudo -u "$user" XDG_RUNTIME_DIR="$user_runtime_dir" systemctl --user disable "$watcher_service"
-    fi
-done
+if [ -f "$user_dir/.config/systemd/user/instance_setup.service" ]; then
+    echo "Stopping the instance setup service."
+    sudo -u "$user" XDG_RUNTIME_DIR="$user_runtime_dir" systemctl --user stop instance_setup.service
+fi
+
+echo "Removing the cron jobs of the user."
+crontab -u "$user" -r 2>/dev/null
 
 # Uninstall rootless dockerd.
 echo "Uninstalling rootless dockerd."
