@@ -118,7 +118,7 @@ Testing did not show problems because most of the risky code only runs in specia
 | L1 | Missing dependencies and undocumented config keys | 🔵 Low | Standards | Confirmed | Easy | Open |
 | L2 | Leaks on rollback and uninstall | 🔵 Low | Reliability | Confirmed | Easy | ✅ Fixed |
 | L3 | Open-file limit change may lower limits on big hosts | 🔵 Low | Behaviour change | Likely | Easy | Open |
-| L4 | Dead code, unused variables, debug leftovers | 🔵 Low | Code quality | Confirmed | Easy | Open |
+| L4 | Dead code, unused variables, debug leftovers | 🔵 Low | Code quality | Confirmed | Easy | 🟡 Partly fixed (`dns_evernode_sh`, plus 2 items via M4/M5) |
 | L5 | Copy-paste errors and typos in messages | 🔵 Low | Code quality | Confirmed | Easy | ✅ Fixed |
 | L6 | Repeated code blocks | 🔵 Low | Code quality | Confirmed | Easy | ✅ Fixed |
 | L7 | Scripts generated through 3 to 4 levels of escaping | 🔵 Low | Maintainability | Confirmed | Medium | Open |
@@ -324,6 +324,7 @@ Testing did not show problems because most of the risky code only runs in specia
 - **What happens:**
   - Port values, domains and env keys come from the tenant and are **never checked**. A port like `abc` or `99999` is accepted.
   - The values are later used in `$(( ))` arithmetic, unquoted commands, heredocs and JSON built by string joins. Today this is safe **only by accident**: `docker tag` (line 598) fails on characters that are not valid in a tag.
+  - Without that line, this is a root command injection: a port setting such as `x[$(cmd)]` runs `cmd` as root at `$((internal_gptcp1_port + 1))` in the `env.vars` heredoc (verified with a harmless payload on 2026-10-14). So the tag line must stay until this fix adds real validation (see the L4 fix log entry). **Remove it as part of this fix.**
   - `cut -d':' -f2` breaks for registries with a port (`host:5000/img:tag`) and for digest references (`img@sha256:...`).
 - **Fix:** Validate early and stop with `INVALID_PARAMS,INST_ERR`:
   - ports must be in 1-65535
@@ -416,14 +417,14 @@ Testing did not show problems because most of the risky code only runs in specia
 - [user-install.sh:95-112](dependencies/user-install.sh#L95-L112) now sets the per-instance `nofile` limit to `250000 / (max_instance_count + 1)`. With 100 instances that is about 2,475 open files per instance, which may be too low for HotPocket plus dockerd.
 - **Fix:** Set a sensible minimum (for example `max(computed, 65536)`) and test. **Easy.**
 
-#### L4. Dead code, unused variables, debug leftovers
+#### L4. Dead code, unused variables, debug leftovers, 🟡 PARTLY FIXED (see the L4 fix log entry)
 
-- `ctx.dns_evernode_sh` ([conf.cpp:119](src/conf.cpp#L119)) is **never used**. Adding it without the header broke the build until `2d346ce`, and commit `d704108` was a typo fix (`.sh.sh`) for it.
-- `docker_pull_timeout_secs` is unused (see M4).
-- Old pull code is left commented out (lines 550-555, 565, 578).
-- The `/root/.acme.sh/dns_evernode.sh` copy is never used.
-- `docker tag ${docker_pull_image} ${docker_image}` (line 598) is no longer needed, because `hp_manager.cpp` now strips the settings before `docker create`. It can also cause a rollback if the full tag is over 128 characters.
-- The `version=` variable was bumped by hand (`0.99` → `1.9`) and has no link to releases.
+- `ctx.dns_evernode_sh` ([conf.cpp:119](src/conf.cpp#L119)) is **never used**. Adding it without the header broke the build until `2d346ce`, and commit `d704108` was a typo fix (`.sh.sh`) for it. ✅ Removed.
+- `docker_pull_timeout_secs` is unused (see M4). ✅ Now used by the M4 fix.
+- Old pull code is left commented out (lines 550-555, 565, 578). ✅ Removed by the M4/M5 fix.
+- The `/root/.acme.sh/dns_evernode.sh` copy is never used. Open.
+- `docker tag ${docker_pull_image} ${docker_image}` (line 598) is no longer needed, because `hp_manager.cpp` now strips the settings before `docker create`. It can also cause a rollback if the full tag is over 128 characters. **Must stay until M8 is fixed:** it is the only check that stops unsafe characters in the settings (see M8).
+- The `version=` variable was bumped by hand (`0.99` → `1.9`) and has no link to releases. Open.
 - **Easy.**
 
 #### L5. Copy-paste errors and typos in messages, ✅ FIXED
@@ -754,3 +755,29 @@ Explanation: `changes/[L9] Hard-coded paths, URLs and DNS servers explained.md`.
   - **Not yet done:** an instance created on a real host with rootless docker 24.0.5, and a real `rollback` while the lock is held (the harness stubs `rollback`).
 
 Explanation: `changes/[M4, M5] Image pull timeout and image cache explained.md`.
+
+### 2026-10-14: L4 partly fixed (unused `ctx.dns_evernode_sh` removed)
+
+- **Findings closed:** none. L4 is **partly fixed**.
+- **Files changed:** `src/conf.hpp`, `src/conf.cpp`.
+- **What changed:**
+  - **`ctx.dns_evernode_sh`.** Removed from `sa_context` and from `conf::init`. Nothing in the agent read it. `dns_evernode.sh` itself is still shipped (installer, CMake), because acme.sh uses it, and `user-install.sh` finds it through `$script_dir`.
+  - **Already done by the M4/M5 fix:** `docker_pull_timeout_secs` is now used by `pull_docker_image()`, and the commented-out pull, frozen-downloader and `tar` lines are gone.
+- **Why:** Unused code still has to be read, kept compiling and kept consistent. `dns_evernode_sh` had already broken the build once (`2d346ce`) and needed a typo fix (`d704108`).
+- **Not changed (still open):**
+  - The `user-install.sh` part of this fix (removing the `/root/.acme.sh` copy, the `version=1.9` variable, and the `echo` lines around `docker tag`) was made and then reverted at the team's request. These items are still open. The changes note describes them.
+  - The `docker tag ${docker_pull_image} ${docker_image}` line. Nothing uses the tag, but it must stay until M8 (see **Found while fixing**).
+- **Found while fixing:**
+  - The `docker tag` line is the only thing that rejects unsafe characters in the tenant's image settings:
+    - The agent passes the image name to `user-install.sh` (run as root) without checking it.
+    - A port setting goes into bash arithmetic (`$((internal_gptcp1_port + 1))` in the `env.vars` heredoc), and bash runs `$(...)` found inside an array index there. A domain setting is pasted into the generated `domain_ssl_update.sh` as code.
+    - `docker tag` runs before both, rejects `$ ( [ ;` and similar characters with "invalid reference format", and rolls back. Without it, `myimg:v1--gptcp1--x[$(cmd)]` would run `cmd` as root.
+  - The settings parser copied from `user-install.sh`, given that name and then the arithmetic, ran a harmless payload. Real docker 28.1.1 rejects the same name in `docker tag`.
+  - This doesn't check whether mb-xrpl or evernode-js already filters image names before they reach the agent. Recorded under M8.
+- **Verified:**
+  - `grep`: no remaining references to `dns_evernode_sh` in `src/`.
+  - All 12 `src/*.cpp` files compile with `g++ -std=c++17 -fsyntax-only`.
+  - `dependencies/user-install.sh` is unchanged from the last commit.
+  - **Not yet done:** a full `make` build.
+
+Explanation: `changes/[L4] Dead code, unused variables, debug leftovers explained.md`.

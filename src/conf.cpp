@@ -116,7 +116,6 @@ namespace conf
 
         ctx.hpfs_exe_path = ctx.exe_dir + "/hpfs";
         ctx.user_install_sh = ctx.exe_dir + "/user-install.sh";
-        ctx.dns_evernode_sh = ctx.exe_dir + "/dns_evernode.sh";
         ctx.user_uninstall_sh = ctx.exe_dir + "/user-uninstall.sh";
 
         ctx.socket_path = ctx.data_dir + "/sa.sock";
