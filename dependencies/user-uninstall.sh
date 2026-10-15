@@ -29,7 +29,9 @@ user_id=$(id -u "$user")
 user_runtime_dir="/run/user/$user_id"
 script_dir=$(dirname "$(realpath "$0")")
 docker_bin=$script_dir/dockerbin
-cleanup_script=$user_dir/uninstall_cleanup.sh
+cleanup_script=/etc/sashimono/cleanup/$user.sh
+npm_resources=$user_dir/.docker/npm_resources
+MBXRPL_CONFIG="/etc/sashimono/mb-xrpl/mb-xrpl.cfg"
 gp_udp_port_count=2
 gp_tcp_port_count=2
 
@@ -170,6 +172,21 @@ if [ -f $cleanup_script ]; then
     echo "Executing cleanup script..."
     chmod +x $cleanup_script
     /bin/bash -c $cleanup_script
+    rm "$cleanup_script"
+fi
+
+# The instance's NPMplus entries are read as data, because the file is written by the instance user.
+if [ -f "$npm_resources" ] && [ ! -L "$npm_resources" ]; then
+    npm_url=$(jq -r ".proxy.npm_url | select( . != null )" "$MBXRPL_CONFIG" 2>/dev/null)
+    npm_token_path=$(jq -r ".proxy.npm_tokenPath | select( . != null )" "$MBXRPL_CONFIG" 2>/dev/null)
+    [ -n "$npm_token_path" ] && npm_token=$(jq -r ".npm.token | select( . != null )" "$npm_token_path" 2>/dev/null)
+    if [ -n "$npm_url" ] && [ -n "$npm_token" ]; then
+        echo "Removing the NPMplus proxy hosts and certificates of the instance."
+        # Reverse order removes proxy hosts before the certificates they use.
+        head -c 65536 "$npm_resources" | grep -xE '(proxy-hosts|certificates) [0-9]{1,10}' | sort -ur | head -n 100 | while read -r npm_type npm_id; do
+            curl -k -s -m 10 -X DELETE -H "Content-Type: application/json; charset=UTF-8" -H "Authorization: Bearer $npm_token" "$npm_url/api/nginx/$npm_type/$npm_id" >/dev/null 2>&1
+        done
+    fi
 fi
 
 echo "Deleting user '$user'"

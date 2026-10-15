@@ -33,6 +33,8 @@ script_dir=$(dirname "$(realpath "$0")")
 # Fallback for upgrades started from a setup.sh older than the firewall service.
 FIREWALL_SERVICE=${FIREWALL_SERVICE:-sashimono-firewall}
 desired_slirp4netns_version="1.2.1"
+desired_acme_sh_version="3.1.6"
+desired_acme_sh_sha256="c7d68b021cfd6380ea83a82962abde5b484779fee0b97d38681dfa1396bbc8d7"
 
 mb_cli_exit_success="MB_CLI_SUCCESS"
 mb_cli_out_prefix="CLI_OUT"
@@ -316,6 +318,16 @@ function check_dependencies() {
         apt-get update >/dev/null
         ! apt-get -y install nftables >/dev/null && echo "Error when installing nftables." && abort
     fi
+
+    stage "Setting up acme.sh"
+    if curl -o "$SASHIMONO_BIN/acme.sh" --fail -sL -m 60 https://raw.githubusercontent.com/acmesh-official/acme.sh/$desired_acme_sh_version/acme.sh &&
+        sha256sum --status -c <<<"$desired_acme_sh_sha256  $SASHIMONO_BIN/acme.sh"; then
+        chmod +x "$SASHIMONO_BIN/acme.sh"
+    else
+        rm -f "$SASHIMONO_BIN/acme.sh"
+        echo "Error when setting up acme.sh $desired_acme_sh_version."
+        info "Warning: Setting up acme.sh failed. Instances with a custom domain cannot be created until it is installed."
+    fi
 }
 
 function exec_mb() {
@@ -520,7 +532,7 @@ chmod -R +x $SASHIMONO_BIN
 # Install Sashimono CLI binaries into user bin dir.
 cp "$script_dir"/sashi $USER_BIN
 
-# Check whether denedencies are installed or not. (slirp4netns, nftables)
+# Check whether denedencies are installed or not. (slirp4netns, nftables, acme.sh)
 check_dependencies
 
 # Download and install rootless dockerd.

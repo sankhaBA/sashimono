@@ -99,8 +99,8 @@ Testing did not show problems because most of the risky code only runs in specia
 | H1 | NPMplus admin token stored in tenant-owned files | 🟠 High | Security | Verified | Medium | Open |
 | H2 | Disk quota changed from group to user, which likely leaves gaps | 🟠 High | Resource limits | Likely | Medium | ✅ Fixed |
 | H3 | Recreated containers run without seccomp/AppArmor | 🟠 High | Security | Confirmed | Easy | ✅ Fixed |
-| H4 | Root runs a tenant-owned cleanup script on uninstall | 🟠 High | Security | Confirmed | Medium | Open |
-| H5 | Code downloaded at runtime from a personal GitHub branch | 🟠 High | Security / supply chain | Confirmed | Easy | Open |
+| H4 | Root runs a tenant-owned cleanup script on uninstall | 🟠 High | Security | Confirmed | Medium | ✅ Fixed |
+| H5 | Code downloaded at runtime from a personal GitHub branch | 🟠 High | Security / supply chain | Confirmed | Easy | ✅ Fixed |
 | H6 | Packages (including a kernel) installed during instance creation | 🟠 High | Operations | Confirmed | Easy | ✅ Fixed |
 | M1 | IPv6 LAN rules never applied (missing table) | 🟡 Medium | Security / bug | Confirmed | Easy | ✅ Fixed |
 | M2 | LAN protection is a weak heuristic | 🟡 Medium | Security | Confirmed | Medium | ✅ Fixed |
@@ -118,7 +118,7 @@ Testing did not show problems because most of the risky code only runs in specia
 | L1 | Missing dependencies and undocumented config keys | 🔵 Low | Standards | Confirmed | Easy | Open |
 | L2 | Leaks on rollback and uninstall | 🔵 Low | Reliability | Confirmed | Easy | ✅ Fixed |
 | L3 | Open-file limit change may lower limits on big hosts | 🔵 Low | Behaviour change | Likely | Easy | Open |
-| L4 | Dead code, unused variables, debug leftovers | 🔵 Low | Code quality | Confirmed | Easy | 🟡 Partly fixed (`dns_evernode_sh`, plus 2 items via M4/M5) |
+| L4 | Dead code, unused variables, debug leftovers | 🔵 Low | Code quality | Confirmed | Easy | 🟡 Partly fixed (`dns_evernode_sh`, plus 2 items via M4/M5 and 1 via H5) |
 | L5 | Copy-paste errors and typos in messages | 🔵 Low | Code quality | Confirmed | Easy | ✅ Fixed |
 | L6 | Repeated code blocks | 🔵 Low | Code quality | Confirmed | Easy | ✅ Fixed |
 | L7 | Scripts generated through 3 to 4 levels of escaping | 🔵 Low | Maintainability | Confirmed | Medium | Open |
@@ -220,14 +220,14 @@ Testing did not show problems because most of the risky code only runs in specia
 - **Fix:** Remove both options and copy the agent's create options exactly.
 - **Feasibility:** Easy.
 
-#### H4. Root runs a tenant-owned cleanup script on uninstall (Confirmed)
+#### H4. Root runs a tenant-owned cleanup script on uninstall (Confirmed), ✅ FIXED
 
 - **Where:** [user-install.sh:1045](dependencies/user-install.sh#L1045) and [user-install.sh:1095](dependencies/user-install.sh#L1095) (`chown -R $user:$user $cleanup_script`), and [user-uninstall.sh:158-162](dependencies/user-uninstall.sh#L158-L162) (root runs it).
 - **What happens:** `uninstall_cleanup.sh` is now owned by the tenant user, because their cron job adds lines to it. Root runs it during uninstall. Any code running as that host user can add commands, and **those commands then run as root**. (The script was already inside the user's home before Gadget, which was a weakness already. Making the user its owner, and making tenant-run scripts write to it, makes it worse.)
 - **Fix:** Keep cleanup scripts outside the user's home, for example in `/var/lib/sashimono/cleanup/<user>.sh`, owned by root, with mode 600. Tenant-run scripts must not write to them. Save the NPMplus IDs as data, not as commands.
 - **Feasibility:** Medium.
 
-#### H5. Code downloaded at runtime from a personal GitHub branch (Confirmed)
+#### H5. Code downloaded at runtime from a personal GitHub branch (Confirmed), ✅ FIXED
 
 - **Where:** [user-install.sh:56-57](dependencies/user-install.sh#L56-L57) and [user-install.sh:637-648](dependencies/user-install.sh#L637-L648).
 - **What happens:**
@@ -422,7 +422,7 @@ Testing did not show problems because most of the risky code only runs in specia
 - `ctx.dns_evernode_sh` ([conf.cpp:119](src/conf.cpp#L119)) is **never used**. Adding it without the header broke the build until `2d346ce`, and commit `d704108` was a typo fix (`.sh.sh`) for it. ✅ Removed.
 - `docker_pull_timeout_secs` is unused (see M4). ✅ Now used by the M4 fix.
 - Old pull code is left commented out (lines 550-555, 565, 578). ✅ Removed by the M4/M5 fix.
-- The `/root/.acme.sh/dns_evernode.sh` copy is never used. Open.
+- The `/root/.acme.sh/dns_evernode.sh` copy is never used. ✅ Removed by the H5 fix.
 - `docker tag ${docker_pull_image} ${docker_image}` (line 598) is no longer needed, because `hp_manager.cpp` now strips the settings before `docker create`. It can also cause a rollback if the full tag is over 128 characters. **Must stay until M8 is fixed:** it is the only check that stops unsafe characters in the settings (see M8).
 - The `version=` variable was bumped by hand (`0.99` → `1.9`) and has no link to releases. Open.
 - **Easy.**
@@ -826,3 +826,64 @@ Explanation: `changes/[M6, M7, M8, M9] Image tag settings and env.vars explained
   - **Not yet done:** a full `make` build.
 
 Explanation: `changes/[L4] Dead code, unused variables, debug leftovers explained.md`.
+
+### 2026-10-15: H5 fixed (no code downloaded while creating an instance)
+
+- **Findings closed:** H5. Also L4's `/root/.acme.sh` copy item.
+- **Files changed:** `installer/sashimono-install.sh`, `dependencies/user-install.sh`.
+- **What changed:**
+  - **`dns_evernode.sh`.** The download from `gadget78/sashimono/main` is removed, with its `ACME_DNS_PLUGIN_URL`. The installer has always shipped this file into `$SASHIMONO_BIN`.
+  - **`acme.sh`.** The installer never shipped it, so the first custom-domain instance on each host downloaded it from upstream `master`. Now `check_dependencies()` in `sashimono-install.sh` installs a pinned release, `desired_acme_sh_version="3.1.6"`, into `$SASHIMONO_BIN`. It downloads the release tag with `curl --fail -m 60` and keeps the file only if it matches `desired_acme_sh_sha256`. It runs on fresh installs and `evernode update`, on every host, because `proxy.tls_type` is set by outside tooling and may come later.
+  - **When the setup fails.** A failed download or a wrong hash deletes the file, logs an error and shows a warning on the console. The install or upgrade continues, at the team's request: the custom-domain feature is optional and not released, so a GitHub outage should not block hosts that don't use it.
+  - **`user-install.sh`.** The `ACME_SH_URL` and both `wget` blocks are removed. On an NPMplus host, when the tenant set a `domain`, the script stops with `NO_ACME,INST_ERR` if `acme.sh` or `dns_evernode.sh` is missing from `$script_dir`. It checks this after the image settings are parsed and before the Linux user is created, so there is nothing to roll back. The per-tenant copy into `~/.acme.sh/` is unchanged.
+  - **`/root/.acme.sh` copy (L4).** It was only made inside the removed plugin download, so it is gone too.
+- **Why:** whoever controlled Gadget's GitHub account, or upstream `master` at the wrong moment, chose the code every custom-domain host ran. That code runs as the tenant's host user, which can read the NPMplus admin token (H1). Nothing was pinned or checked, hosts on the same release could run different `acme.sh` versions, and the download ran inside lease creation with no timeout. A failed `wget -O` also left an empty file behind, which the "is it missing" check then accepted on every later instance, so a host stayed broken until someone deleted the file.
+- **Not changed:**
+  - Uninstall needed nothing. `sashimono-uninstall.sh` already deletes everything in `$SASHIMONO_BIN` except mb-xrpl and itself, which includes `acme.sh`. The same step runs before every upgrade, so a copy downloaded from `master` by older code is gone before the installer sets up the pinned one. Its lines that remove `/root/.acme.sh/dns_evernode.sh` (L2) stay, for hosts that got that copy from older code.
+  - Existing custom-domain instances keep the `acme.sh` copy in their `~/.acme.sh/` until they are redeployed.
+  - Updating `acme.sh` now needs a Sashimono release that changes the version and the hash. The hash is the real protection, because a Git tag can be moved.
+  - L1: no script in the repo uses `wget` any more, so L1 no longer needs to add it to `prereq.sh`.
+- **Verified:**
+  - Two separate downloads of `acme.sh` 3.1.6 gave the same SHA-256, and the file reports `v3.1.6`. 3.1.6 still finds the DNS plugin in `~/.acme.sh/` (`LE_WORKING_DIR`), where the per-tenant copy goes.
+  - `check_dependencies()` with stubbed `curl`: a good download (file kept, executable), a failed download and a wrong hash (both: no file left, error in the log, warning on the console, install continues). With the real `curl`: 3.1.6 downloaded, hash matched, file executable.
+  - The `NO_ACME` check: stops when `acme.sh` or `dns_evernode.sh` is missing on an NPMplus host with a domain. Continues when both are present, when no domain is set, and on non-NPMplus hosts.
+  - `bash -n` passes for both scripts. `shellcheck` 0.10.0: `user-install.sh` 60 → 60, `sashimono-install.sh` 218 → 218.
+  - `grep`: no `ACME_SH_URL`, `ACME_DNS_PLUGIN_URL`, `gadget78/sashimono` or `wget` left in `dependencies/`, `installer/` or `src/`.
+  - **Not yet done:** an install and an upgrade on a real host, and a custom-domain instance on an NPMplus host.
+
+Explanation: `changes/[H5] Runtime code downloads explained.md`.
+
+### 2026-10-15: H4 fixed (root no longer runs a file the tenant can write)
+
+- **Findings closed:** H4.
+- **Files changed:** `dependencies/user-install.sh` (and the `domain_ssl_update.sh` it generates), `dependencies/user-uninstall.sh`.
+- **What changed:**
+  - **Cleanup script location.** It moved from `/home/<user>/uninstall_cleanup.sh` to `/etc/sashimono/cleanup/<user>.sh`. Only root writes it, and the folder is created with mode 700. The `chown` to the tenant user is removed. Its only line is now the `ip addr del` for the outbound IPv6 address, written by `user-install.sh` right after the address is added, so a rollback still removes it. `user-uninstall.sh` runs it as before and then deletes it.
+  - **NPMplus entries are data, not commands.** The generated `domain_ssl_update.sh` writes `certificates <id>` and `proxy-hosts <id>` lines to `~/.docker/npm_resources`, instead of `curl` command lines with the admin token. At uninstall, after the user's processes are killed and before the home folder is deleted, root:
+    - reads the file only if it is a regular file and not a symlink, and reads at most its first 64 KiB. So a FIFO, a symlink to `/proc/kmsg` (which never ends) or a huge sparse file can't make uninstall hang or run for hours;
+    - keeps only lines that are exactly `(proxy-hosts|certificates) <1-10 digits>`, removes duplicates and takes at most 100;
+    - deletes proxy hosts before the certificates they use, with `curl -m 10`. So a flooded file can delay an uninstall by about 17 minutes at most (100 × 10 s);
+    - reads the URL and the token from its own `mb-xrpl.cfg` (`proxy.npm_url`, `proxy.npm_tokenPath`), and skips this step if either is missing.
+  - **Log copy removed.** The `cat ~/.docker/domain_ssl_update.log >> /root/domain_ssl_update.log` line is gone. The log was only for debugging, and root shouldn't copy a file the tenant controls.
+- **Why:** the tenant user owned the file and the folder it was in, and a script that runs as the tenant appended command lines to it, so root ran whatever that user wrote. Any code running as the host user (a container escape, or a bug in a script run as that user) would become root at the end of the lease. Rootless Docker and a Linux user per tenant are meant to stop an escape at that user.
+- **Not changed:**
+  - **Released hosts.** The `ip addr del` line is not Gadget's: it shipped in `ES2025.8.1`. Instances created before this upgrade have it only in the old home file, which is no longer run. When those leases end, their outbound IPv6 address stays on the interface until the next lease on the same slot uses it again (mb-xrpl gives each lease slot a fixed address) and removes it at its end, or until a reboot. Running only strictly checked `ip addr del` lines from the old file was considered and rejected: a compromised old instance could still make root remove any IPv6 address on that interface, including the host's own.
+  - **Gadget-era instances on dev hosts.** Their already-generated `domain_ssl_update.sh` still writes `curl` lines into the old home file, so their NPMplus entries are not removed at uninstall.
+  - **Which IDs get deleted.** The tenant chooses the IDs in `npm_resources`, so root can be made to delete another NPMplus entry by ID. Today this gives the tenant nothing new, because the host user already holds the token (H1). Once H1 is fixed, the C4 fix (record the IDs at creation time in a root-owned file) closes it.
+  - The full uninstaller needed nothing: it deletes `/etc/sashimono` on a full uninstall and keeps it on upgrade, so existing cleanup scripts survive an upgrade. Its `rm -f /root/domain_ssl_update.log` line (L2) stays as legacy cleanup, like the `/root/.acme.sh` lines in the H5 fix.
+  - `curl -k` (M13) and the token inside `domain_ssl_update.sh` (H1).
+- **Verified:**
+  - Rendered `domain_ssl_update.sh`, old vs new: only the 4 recording lines differ. They write to the home data file with the IDs expanded at run time. The rendered script has no `cleanup`, `uninstall_cleanup` or `Bearer` in a recording line, and passes `bash -n`.
+  - The IPv6 block and the uninstall run with a stubbed `ip`: no folder without IPv6; with IPv6, folder mode 700 and the one `ip addr del` line; uninstall ran it and deleted the file; a second uninstall without the file passed.
+  - The NPMplus block with a stubbed `curl`:
+    - valid and duplicate lines: one call each, proxy hosts first;
+    - injected text (`; reboot`, `curl evil | bash`, `../`, negative, 11-digit, unknown type, leading space): only the exact line was used;
+    - 500 lines: 100 calls;
+    - missing config or token path: no calls;
+    - a symlink to a FIFO, to `/proc/kmsg`, to `/etc/passwd` or to a valid file: skipped, no calls, no hang;
+    - a 100 GB sparse file: done in 70 ms, no calls; an entry after the first 64 KiB: ignored;
+    - a missing file: no calls.
+  - `bash -n` passes for both scripts. `shellcheck` 0.10.0: `user-install.sh` 60 → 57, `user-uninstall.sh` 22 → 22.
+  - **Not yet done:** an instance with outbound IPv6 on a real host (create, rollback, lease end), and a custom-domain instance on an NPMplus host.
+
+Explanation: `changes/[H4] Root runs a tenant-owned cleanup script explained.md`.

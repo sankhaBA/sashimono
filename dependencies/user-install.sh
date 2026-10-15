@@ -39,7 +39,9 @@ docker_bin=$script_dir/dockerbin
 docker_img_dir=$docker_bin/images
 docker_service="docker.service"
 docker_pull_timeout_secs=120
-cleanup_script=$user_dir/uninstall_cleanup.sh
+cleanup_dir=/etc/sashimono/cleanup
+cleanup_script=$cleanup_dir/$user.sh
+npm_resources=$user_dir/.docker/npm_resources
 gp_udp_port_count=2
 gp_tcp_port_count=2
 osversion=$(grep -ioP '^VERSION_ID=\K.+' /etc/os-release)
@@ -63,8 +65,6 @@ DNS_RESOLVER=${DNS_RESOLVER:-8.8.8.8}
 # configured urls
 DOCKER_AUTH_URL="https://auth.docker.io/token?service=registry.docker.io&scope=repository:"
 DOCKER_REGISTRY_URL="https://registry-1.docker.io/v2/"
-ACME_SH_URL="https://raw.githubusercontent.com/acmesh-official/acme.sh/master/acme.sh"
-ACME_DNS_PLUGIN_URL="https://raw.githubusercontent.com/gadget78/sashimono/main/dependencies/dns_evernode.sh"
 
 # Check if users already exists.
 [ "$(id -u "$user" 2>/dev/null || echo -1)" -ge 0 ] && echo "HAS_USER,INST_ERR" && exit 1
@@ -230,6 +230,10 @@ duplicate_port=$(printf '%s\n' "$internal_peer_port" "$internal_gpudp1_port" "$i
 
 # Without settings the container runs the HotPocket contract. With settings it runs the image's own command, unless "contract" is "true".
 [[ -n "$run_contract" ]] || run_contract=$([[ "$custom_docker_settings" == "true" ]] && echo false || echo true)
+
+if [[ "$TLS_TYPE" == "NPMplus" ]] && [[ -n "$custom_docker_domain" ]] && [[ ! -f "$script_dir/acme.sh" || ! -f "$script_dir/dns_evernode.sh" ]]; then
+    echo "NO_ACME,INST_ERR" && exit 1
+fi
 
 instance_domain="$custom_docker_domain"
 [[ -n "$custom_docker_subdomain" ]] && instance_domain="$custom_docker_subdomain.${EVERNODE_HOSTNAME#*.}"
@@ -448,6 +452,7 @@ if [ "$outbound_ipv6" != "-" ] && [ "$outbound_net_interface" != "-" ]; then
     ip addr add $outbound_ipv6 dev $outbound_net_interface
 
     # Add instructions to the cleanup script so the outbound ip assignment will be removed upon user uninstall.
+    mkdir -p -m 700 $cleanup_dir
     echo "ip addr del $outbound_ipv6 dev $outbound_net_interface" >>$cleanup_script
 fi
 
@@ -548,19 +553,6 @@ if [[ "$TLS_TYPE" == "NPMplus" ]]; then
     echo "NPMplus install detected"
 
     if [[ -n "$custom_docker_domain" ]]; then
-        if [[ ! -f "$script_dir/acme.sh" ]]; then
-            echo "base acme.sh missing, re-installing"
-            wget -O "$script_dir"/acme.sh "$ACME_SH_URL"
-            chmod +x "$script_dir"/acme.sh
-        fi
-        if [[ ! -f "$script_dir/dns_evernode.sh" ]]; then
-            echo "base evernode dns plugin for acme.sh missing, re-installing"
-            wget -O "$script_dir"/dns_evernode.sh "$ACME_DNS_PLUGIN_URL"
-            chmod +x "$script_dir"/dns_evernode.sh
-            mkdir -p /root/.acme.sh
-            cp "$script_dir"/dns_evernode.sh /root/.acme.sh/dns_evernode.sh
-        fi
-
         mkdir -p $user_dir/.acme.sh/
         cp "$script_dir"/acme.sh $user_dir/.acme.sh/acme.sh
         cp "$script_dir"/dns_evernode.sh $user_dir/.acme.sh/dns_evernode.sh
@@ -596,7 +588,7 @@ download_npm_cert() {
             mv "\$tls_file" "$user_dir/$contract_dir/tls/\$tls_newname"
         done
         chown -R $user:$user $user_dir/$contract_dir/tls
-        if [[ "\$NPM_CERT_ID_WILD" == "false" ]]; then echo "curl -k -m 100 -X DELETE -H \"Content-Type: application/json; charset=UTF-8\" -H \"Authorization: Bearer \$NPM_TOKEN\" \$NPM_URL/api/nginx/certificates/\$NPM_CERT_ID" >>$cleanup_script; fi
+        if [[ "\$NPM_CERT_ID_WILD" == "false" ]]; then echo "certificates \$NPM_CERT_ID" >>$npm_resources; fi
         NPM_CERT_ID_STRING=",\"certificate_id\":\$NPM_CERT_ID,\"ssl_forced\":1"
     else
         return 1
@@ -774,7 +766,7 @@ if [[ "\$tls_type" == "NPMplus" ]]; then
                     fi
                 else
                     echo "certificate added, for host domain \$custom_docker_domain, with ID:\$NPM_CERT_ID   WILDCARD:\$NPM_CERT_ID_WILD"
-                    if [[ "\$NPM_CERT_ID_WILD" == "false" ]]; then echo "curl -k -m 100 -X DELETE -H \"Content-Type: application/json; charset=UTF-8\" -H \"Authorization: Bearer \$NPM_TOKEN\" \$NPM_URL/api/nginx/certificates/\$NPM_CERT_ID" >>$cleanup_script; fi
+                    if [[ "\$NPM_CERT_ID_WILD" == "false" ]]; then echo "certificates \$NPM_CERT_ID" >>$npm_resources; fi
                     NPM_CERT_ID_STRING=",\"certificate_id\":\$NPM_CERT_ID,\"ssl_forced\":1"
                 fi
             elif [ "\$NPM_CERT_PROVIDER" != "other" ]; then
@@ -803,7 +795,7 @@ if [[ "\$tls_type" == "NPMplus" ]]; then
             if [[ "\$NPM_ADD_RESPONSE_CHECK" == "1" || "\$NPM_ADD_RESPONSE_CHECK" == "true" ]]; then
                 echo "added new proxy host to NPM with domain \$custom_docker_domain"
                 NPM_PROXYHOSTS_ID=\$( echo "\$NPM_ADD_RESPONSE" | jq -r '.id')
-                echo "curl -k -s -m 100 -X DELETE -H \"Content-Type: application/json; charset=UTF-8\" -H \"Authorization: Bearer \$NPM_TOKEN\" \$NPM_URL/api/nginx/proxy-hosts/\$NPM_PROXYHOSTS_ID >/dev/null 2>&1" >>$cleanup_script
+                echo "proxy-hosts \$NPM_PROXYHOSTS_ID" >>$npm_resources
             else
                 echo "failed to add new proxy host domain on NPM+ \$custom_docker_domain, this will cause issues connecting via this domain. (debug_check:\$NPM_ADD_RESPONSE_CHECK   debug_response:\$NPM_ADD_RESPONSE )"
             fi
@@ -813,7 +805,7 @@ if [[ "\$tls_type" == "NPMplus" ]]; then
             NPM_EDIT_RESPONSE_CHECK=\$(jq -r '.enabled // "no enabled entry"' <<< "\$NPM_EDIT_RESPONSE" || echo "jq error, no json output?")
             if [[ "\$NPM_EDIT_RESPONSE_CHECK" == "1" || "\$NPM_EDIT_RESPONSE_CHECK" == "true" ]]; then
                 echo "updated proxy host with domain \$custom_docker_domain"
-                echo "curl -k -s -m 100 -X DELETE -H \"Content-Type: application/json; charset=UTF-8\" -H \"Authorization: Bearer \$NPM_TOKEN\" \$NPM_URL/api/nginx/proxy-hosts/\$NPM_PROXYHOSTS_ID >/dev/null 2>&1" >>$cleanup_script
+                echo "proxy-hosts \$NPM_PROXYHOSTS_ID" >>$npm_resources
             else
                 echo "failed to edit proxy host domain on NPM+, this will cause issues connecting via this domain. ( debug_check:\$NPM_EDIT_RESPONSE_CHECK    debug_response:\$NPM_EDIT_RESPONSE )"
             fi
@@ -890,8 +882,6 @@ sudo -u "$user" XDG_RUNTIME_DIR="$user_runtime_dir" systemctl --user daemon-relo
     echo "*/5 * * * * /bin/bash $user_dir/.docker/env_vars_update.sh"
     [[ "$domain_setup" == "true" ]] && echo "0 0 */7 * * sleep \$((RANDOM*3540/32768)) && /usr/bin/bash $user_dir/.docker/domain_ssl_update.sh 2>&1 | tee -a $user_dir/.docker/domain_ssl_update.log"
 } | crontab -u "$user" - || echo "Warning: Adding the cron jobs of the instance failed."
-echo "cat $user_dir/.docker/domain_ssl_update.log >> /root/domain_ssl_update.log" >>$cleanup_script
-chown -R $user:$user $cleanup_script
 
 # In the Sashimono configuration, CPU time is 1000000us Sashimono is given max_cpu_us out of it.
 # Instance allocation is multiplied by number of cores to determined the number of cores per instance and devided by 10 since cfs_period_us is set to 100000us

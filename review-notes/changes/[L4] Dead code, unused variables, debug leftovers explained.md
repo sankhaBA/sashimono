@@ -11,11 +11,11 @@ L4 groups six leftovers from Gadget's commits. Most are only clutter. One of the
 | 1 | `ctx.dns_evernode_sh` | `src/conf.hpp`, `src/conf.cpp` | ✅ Removed in this fix |
 | 2 | `docker_pull_timeout_secs` never used | `user-install.sh` | ✅ Fixed by M4: `pull_docker_image()` uses it |
 | 3 | Commented-out pull / downloader / `tar` code | `user-install.sh` | ✅ Removed by the M4/M5 fix |
-| 4 | Copy of `dns_evernode.sh` into `/root/.acme.sh` | `user-install.sh`, acme.sh setup | Open |
+| 4 | Copy of `dns_evernode.sh` into `/root/.acme.sh` | `user-install.sh`, acme.sh setup | ✅ Removed by the H5 fix |
 | 5 | `docker tag ${docker_pull_image} ${docker_image}` | `user-install.sh`, after the image block | Open: must stay until M8 |
 | 6 | Hand-bumped `version=1.9` | `user-install.sh` and the generated `domain_ssl_update.sh` | Open |
 
-Items 4 and 6, and the `echo` lines around item 5, were removed at first, then reverted at the team's request. They are described in section 3 for whoever picks them up.
+Items 4 and 6, and the `echo` lines around item 5, were removed at first, then reverted at the team's request. They are described in section 3 for whoever picks them up. Item 4 was later removed by the H5 fix, together with the download around it.
 
 ## 2. What was changed
 
@@ -30,6 +30,8 @@ The field and its assignment are removed. The `dns_evernode.sh` file itself is s
 ## 3. What is still open
 
 ### The `/root/.acme.sh/dns_evernode.sh` copy
+
+**Status: ✅ removed by the H5 fix (2026-10-15).**
 
 When the plugin is missing from `$script_dir`, the script downloads it and also copies it into `/root/.acme.sh`. But every custom-domain instance gets its own copies:
 
