@@ -30,7 +30,11 @@ extra_txn_fee=${23}
 fallback_rippled_servers=${24}
 
 script_dir=$(dirname "$(realpath "$0")")
+# Fallback for upgrades started from a setup.sh older than the firewall service.
+FIREWALL_SERVICE=${FIREWALL_SERVICE:-sashimono-firewall}
 desired_slirp4netns_version="1.2.1"
+desired_acme_sh_version="3.1.6"
+desired_acme_sh_sha256="c7d68b021cfd6380ea83a82962abde5b484779fee0b97d38681dfa1396bbc8d7"
 
 mb_cli_exit_success="MB_CLI_SUCCESS"
 mb_cli_out_prefix="CLI_OUT"
@@ -175,6 +179,11 @@ function call_third_party() {
     return 1
 }
 
+function is_cgroup_v2() {
+    # cgroup v2 (unified hierarchy) is mounted as cgroup2fs. Hybrid setups are treated as cgroup v1.
+    [ "$(stat -fc %T /sys/fs/cgroup/)" == "cgroup2fs" ]
+}
+
 function cgrulesengd_servicename() {
     # Find the cgroups rules engine service.
     local cgrulesengd_filepath=$(grep "ExecStart.*=.*/cgrulesengd$" /etc/systemd/system/*.service | head -1 | awk -F : ' { print $1 } ')
@@ -220,6 +229,7 @@ function setup_certbot() {
         local lenc_acc_email=$(call_third_party "certbot show_account" "get current certbot account" 2>/dev/null | grep "Email contact:" | cut -d ':' -f2 | sed 's/ *//g')
 
         # If there's an existing registration with a different email and it has certificates, complain and return.
+        # Registrations without an email show "none", those can be updated safely.
         if [[ ! -z $lenc_acc_email ]] && [[ $lenc_acc_email != $email_address ]]; then
             # If there are certificates complain and return. Otherwise update email.
             local count=$(call_third_party "certbot certificates" "check letsencrypt certificates" 2>/dev/null | grep -c "Certificate Name")
@@ -301,6 +311,22 @@ function check_dependencies() {
         curl -o /tmp/slirp4netns --fail -sL https://github.com/rootless-containers/slirp4netns/releases/download/v$desired_slirp4netns_version/slirp4netns-$(uname -m)
         chmod +x /tmp/slirp4netns
         mv /tmp/slirp4netns /usr/bin/
+    fi
+
+    if ! command -v nft &>/dev/null; then
+        stage "Installing nftables"
+        apt-get update >/dev/null
+        ! apt-get -y install nftables >/dev/null && echo "Error when installing nftables." && abort
+    fi
+
+    stage "Setting up acme.sh"
+    if curl -o "$SASHIMONO_BIN/acme.sh" --fail -sL -m 60 https://raw.githubusercontent.com/acmesh-official/acme.sh/$desired_acme_sh_version/acme.sh &&
+        sha256sum --status -c <<<"$desired_acme_sh_sha256  $SASHIMONO_BIN/acme.sh"; then
+        chmod +x "$SASHIMONO_BIN/acme.sh"
+    else
+        rm -f "$SASHIMONO_BIN/acme.sh"
+        echo "Error when setting up acme.sh $desired_acme_sh_version."
+        info "Warning: Setting up acme.sh failed. Instances with a custom domain cannot be created until it is installed."
     fi
 }
 
@@ -453,13 +479,14 @@ function upgrade() {
     return 0
 }
 
-# Check cgroup rule config exists.
-[ ! -f /etc/cgred.conf ] && echo "cgroups is not configured. Make sure you've installed and configured cgroup-tools." && exit 1
+# Check cgroup rule config exists (Only required with cgroup v1).
+! is_cgroup_v2 && [ ! -f /etc/cgred.conf ] && echo "cgroups is not configured. Make sure you've installed and configured cgroup-tools." && exit 1
 
 # Stop services before start upgrade.
 if [[ "$UPGRADE" == "1" ]]; then
     systemctl stop $SASHIMONO_SERVICE
     systemctl stop $CGCREATE_SERVICE
+    systemctl stop $FIREWALL_SERVICE
     sudo -u "$MB_XRPL_USER" XDG_RUNTIME_DIR="$mb_user_runtime_dir" systemctl --user stop $MB_XRPL_SERVICE
 fi
 
@@ -490,7 +517,7 @@ rm -r "$tmp"
         -out $SASHIMONO_DATA/contract_template/cfg/tlscert.pem -subj "/C=HP/CN=$(jq -r '.hp.host_address' $SASHIMONO_DATA/sa.cfg)"
 
 # Install Sashimono agent binaries into sashimono bin dir.
-cp "$script_dir"/{sagent,hpfs,user-cgcreate.sh,user-install.sh,dns_evernode.sh,user-uninstall.sh,docker-registry-uninstall.sh} $SASHIMONO_BIN
+cp "$script_dir"/{sagent,hpfs,user-cgcreate.sh,user-firewall.sh,user-install.sh,dns_evernode.sh,user-uninstall.sh,docker-registry-uninstall.sh} $SASHIMONO_BIN
 chmod -R +x $SASHIMONO_BIN
 
 # Setup tls certs used for contract instance websockets.
@@ -505,7 +532,7 @@ chmod -R +x $SASHIMONO_BIN
 # Install Sashimono CLI binaries into user bin dir.
 cp "$script_dir"/sashi $USER_BIN
 
-# Check whether denedencies are installed or not. (slirp4netns)
+# Check whether denedencies are installed or not. (slirp4netns, nftables, acme.sh)
 check_dependencies
 
 # Download and install rootless dockerd.
@@ -578,22 +605,28 @@ fi
 
 stage "Configuring Sashimono services"
 
-cgrulesengd_service=$(cgrulesengd_servicename)
-[ -z "$cgrulesengd_service" ] && echo "cgroups rules engine service does not exist." && abort
-
-# Setting up cgroup rules with sashiusers group (if not already setup).
-echo "Creating cgroup rules..."
 ! grep -q $SASHIUSER_GROUP /etc/group && ! groupadd $SASHIUSER_GROUP && echo "$SASHIUSER_GROUP group creation failed." && abort
-if ! grep -q $SASHIUSER_GROUP /etc/cgrules.conf; then
-    ! echo "@$SASHIUSER_GROUP       cpu,memory              %u$CG_SUFFIX" >>/etc/cgrules.conf && echo "Cgroup rule creation failed." && abort
-    # Restart the service to apply the cgrules config.
-    echo "Restarting the '$cgrulesengd_service' service."
-    systemctl restart $cgrulesengd_service || abort
+
+if is_cgroup_v2; then
+    # With cgroup v2, resources are limited using systemd user slices which are configured per user.
+    echo "cgroup v2 detected. Using systemd user slices for resource limits."
+else
+    cgrulesengd_service=$(cgrulesengd_servicename)
+    [ -z "$cgrulesengd_service" ] && echo "cgroups rules engine service does not exist." && abort
+
+    # Setting up cgroup rules with sashiusers group (if not already setup).
+    echo "Creating cgroup rules..."
+    if ! grep -q $SASHIUSER_GROUP /etc/cgrules.conf; then
+        ! echo "@$SASHIUSER_GROUP       cpu,memory              %u$CG_SUFFIX" >>/etc/cgrules.conf && echo "Cgroup rule creation failed." && abort
+        # Restart the service to apply the cgrules config.
+        echo "Restarting the '$cgrulesengd_service' service."
+        systemctl restart $cgrulesengd_service || abort
+    fi
 fi
 
 # Install Sashimono Agent cgcreate service.
-# This is a oneshot service which runs once at system startup. The intention is to run 'cgcreate' for
-# all sashimono users every time the system boots up.
+# This is a oneshot service which runs once at system startup. The intention is to apply resource limits for
+# all sashimono users every time the system boots up ('cgcreate' with cgroup v1, systemd user slices with cgroup v2).
 echo "[Unit]
 Description=Sashimono cgroup creation service.
 After=network.target
@@ -604,6 +637,27 @@ Type=oneshot
 ExecStart=$SASHIMONO_BIN/user-cgcreate.sh $SASHIMONO_DATA
 [Install]
 WantedBy=multi-user.target" >/etc/systemd/system/$CGCREATE_SERVICE.service
+
+# Install Sashimono firewall service.
+# This is a oneshot service which applies the nftables firewall rules for all sashimono users every time the system boots up.
+# It runs once the network is online (to detect the host addresses and DNS servers) and before the users' services start.
+# It is also re-run whenever nftables.service is restarted or reloaded, since that flushes the ruleset.
+echo "[Unit]
+Description=Sashimono firewall service.
+Wants=network-online.target
+After=network-online.target nftables.service
+Before=systemd-user-sessions.service
+PartOf=nftables.service
+ReloadPropagatedFrom=nftables.service
+[Service]
+User=root
+Group=root
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=$SASHIMONO_BIN/user-firewall.sh $SASHIMONO_DATA
+ExecReload=$SASHIMONO_BIN/user-firewall.sh $SASHIMONO_DATA
+[Install]
+WantedBy=multi-user.target nftables.service" >/etc/systemd/system/$FIREWALL_SERVICE.service
 
 echo "Configuring sashimono agent service..."
 
@@ -660,6 +714,8 @@ WantedBy=multi-user.target" >/etc/systemd/system/$SASHIMONO_SERVICE.service
 systemctl daemon-reload
 systemctl enable $CGCREATE_SERVICE
 systemctl start $CGCREATE_SERVICE
+systemctl enable $FIREWALL_SERVICE
+systemctl start $FIREWALL_SERVICE
 systemctl enable $SASHIMONO_SERVICE
 # Here, $SASHIMONO_SERVICE is only enabled. Not started. It'll be started after pending reboot checks at
 # the bottom of this script.

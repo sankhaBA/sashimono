@@ -30,13 +30,7 @@ if [ -z "$(ls -A $docker_bin 2>/dev/null)" ]; then
 
 fi
 
-# Download the frozen image download file if not exists
-if [ ! -f "$docker_bin/download-frozen-image-v2.sh" ]; then
-    mkdir -p "$docker_bin"
-    wget https://raw.githubusercontent.com/moby/moby/master/contrib/download-frozen-image-v2.sh -O "$docker_bin/download-frozen-image-v2.sh" ||
-        { echo "Error downloading download-frozen-image-v2"; exit 1; }
-    chmod +x "$docker_bin/download-frozen-image-v2.sh"
-    chown -R $(id -u):$(id -g) "$docker_bin/download-frozen-image-v2.sh"
-fi
+# Clear the image cache, so an upgrade also drops cache files in older layouts. Instances pull an image again when it isn't cached.
+[ -d "$docker_bin" ] && rm -rf "$docker_bin/images" "$docker_bin/download-frozen-image-v2.sh"
 
 exit 0
