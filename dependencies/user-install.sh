@@ -142,6 +142,25 @@ function wait_for_dockerd() {
     done
 }
 
+function dockerd_in_user_slice() {
+    local pid=$(pgrep -u "$user" -x dockerd | head -1)
+    [ -z "$pid" ] && echo "Could not find the dockerd process of $user." && return 1
+    local cgroups
+    cgroups=$(cat /proc/$pid/cgroup) || return 1
+
+    local slice_path="/user.slice/user-$user_id.slice"
+    local controller path
+    for controller in cpu memory; do
+        path=$(awk -F: -v c="$controller" '{ n = split($2, ctrls, ","); for (i = 1; i <= n; i++) if (ctrls[i] == c) { print $3; exit } }' <<<"$cgroups")
+        [ -z "$path" ] && path=$(awk -F: '$1 == "0" && $2 == "" { print $3; exit }' <<<"$cgroups")
+        if [[ "$path" != "$slice_path" && "$path" != "$slice_path/"* ]]; then
+            echo "dockerd of $user is in the $controller cgroup '$path', which is outside $slice_path."
+            return 1
+        fi
+    done
+    return 0
+}
+
 # Stops the installation because of an invalid setting in the image tag. Nothing is created yet, so there is nothing to roll back.
 function image_settings_error() {
     echo "Invalid image tag settings in '$docker_image'. $1"
@@ -290,6 +309,28 @@ echo "$user hard nproc $nproc_soft_limit" | tee -a /etc/security/limits.conf
 useradd --shell /usr/sbin/nologin -m $user
 usermod --lock $user
 usermod -a -G $group $user
+user_id=$(id -u "$user")
+
+echo "Setting up user slice resources."
+
+cores=$(grep -c ^processor /proc/cpuinfo)
+cpu_period=1000000
+cpu_quota=$(expr $(expr $cores \* $cpu \* 100 \/ $cpu_period))
+[ $cpu_quota -lt 1 ] && cpu_quota=1 
+
+swap_only_mem=$((swapmem - memory))
+[ $swap_only_mem -lt 0 ] && swap_only_mem=0
+
+# Resource limiting for the unprivileged user, with both cgroup v1 and v2.
+mkdir -p /etc/systemd/system/user-$user_id.slice.d
+echo "[Slice]
+MemoryAccounting=true
+CPUAccounting=true
+MemoryMax=${memory}K
+CPUQuota=${cpu_quota}%
+MemorySwapMax=${swap_only_mem}K" | sudo tee /etc/systemd/system/user-$user_id.slice.d/override.conf
+systemctl daemon-reload || rollback "SLICE_ERR"
+
 loginctl enable-linger $user # Enable lingering to support rootless dockerd service installation.
 chmod o-rwx "$user_dir"
 echo "Created '$user' user."
@@ -319,7 +360,6 @@ fi
 usermod --lock "$contract_user"
 echo "Created '$contract_user' contract user."
 
-user_id=$(id -u "$user")
 user_runtime_dir="/run/user/$user_id"
 dockerd_socket="unix://$user_runtime_dir/docker.sock"
 
@@ -476,6 +516,8 @@ sudo -u "$user" XDG_RUNTIME_DIR="$user_runtime_dir" systemctl --user restart $do
 service_ready $docker_service || rollback "NO_DOCKERSVC"
 # Wait until docker daemon ready, If failed rollback.
 ! wait_for_dockerd && rollback "NO_DOCKERD"
+# Make sure the resource limits of the user slice apply to the instance.
+dockerd_in_user_slice || rollback "CGROUP_ERR"
 echo "finished Installing rootless dockerd."
 
 
@@ -882,34 +924,6 @@ sudo -u "$user" XDG_RUNTIME_DIR="$user_runtime_dir" systemctl --user daemon-relo
     echo "*/5 * * * * /bin/bash $user_dir/.docker/env_vars_update.sh"
     [[ "$domain_setup" == "true" ]] && echo "0 0 */7 * * sleep \$((RANDOM*3540/32768)) && /usr/bin/bash $user_dir/.docker/domain_ssl_update.sh 2>&1 | tee -a $user_dir/.docker/domain_ssl_update.log"
 } | crontab -u "$user" - || echo "Warning: Adding the cron jobs of the instance failed."
-
-# In the Sashimono configuration, CPU time is 1000000us Sashimono is given max_cpu_us out of it.
-# Instance allocation is multiplied by number of cores to determined the number of cores per instance and devided by 10 since cfs_period_us is set to 100000us
-
-echo "Setting up user slice resources."
-
-cores=$(grep -c ^processor /proc/cpuinfo)
-cpu_period=1000000
-cpu_quota=$(expr $(expr $cores \* $cpu \* 100 \/ $cpu_period))
-[ $cpu_quota -lt 1 ] && cpu_quota=1 # CPUQuota should be at least 1%.
-
-# Received swap memory quota includes the memory quota (memory.memsw.limit_in_bytes semantics in cgroup v1).
-# MemorySwapMax (memory.swap.max in cgroup v2) excludes the memory, so take only the swap portion.
-swap_only_mem=$((swapmem - memory))
-[ $swap_only_mem -lt 0 ] && swap_only_mem=0
-
-# Resource limiting for the unprivileged user
-# This is the resource limiting mechanism with cgroup v2. With cgroup v1, the cgroup rules engine moves
-# user processes into the cgroups created by user-cgcreate.sh.
-mkdir -p /etc/systemd/system/user-$user_id.slice.d
-echo "[Slice]
-MemoryAccounting=true
-CPUAccounting=true
-MemoryMax=${memory}K
-CPUQuota=${cpu_quota}%
-MemorySwapMax=${swap_only_mem}K" | sudo tee /etc/systemd/system/user-$user_id.slice.d/override.conf
-
-systemctl daemon-reload
 
 echo "$user_id,$user,$dockerd_socket,INST_SUC"
 exit 0
