@@ -41,6 +41,9 @@ jobs:
           fetch-depth: 0
           submodules: recursive
 
+      - name: Trust workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - name: Verify tag is on the release branch
         if: github.ref_type == 'tag'
         run: git merge-base --is-ancestor "$GITHUB_SHA" "origin/$RELEASE_BRANCH"
