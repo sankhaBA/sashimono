@@ -35,6 +35,18 @@ namespace hp
         }
     };
 
+    // Container side ports and command of an instance, written by user-install.sh from the tenant's image tag settings.
+    struct container_settings
+    {
+        uint16_t peer_port = 0;
+        uint16_t user_port = 0;
+        uint16_t gp_tcp_port_1 = 0;
+        uint16_t gp_tcp_port_2 = 0;
+        uint16_t gp_udp_port_1 = 0;
+        uint16_t gp_udp_port_2 = 0;
+        bool run_contract = true;
+    };
+
     struct instance_info
     {
         std::string owner_pubkey;
@@ -73,9 +85,15 @@ namespace hp
 
     int create_new_instance(std::string &error_msg, instance_info &info, std::string_view container_name, std::string_view owner_pubkey, const std::string &contract_id, const std::string &image_key, std::string_view outbound_ipv6, std::string_view outbound_net_interface);
 
+    int strip_image_settings(std::string_view image, std::string &docker_image);
+
     int initiate_instance(std::string &error_msg, std::string_view container_name, const msg::initiate_msg &config_msg);
 
     int create_container(std::string_view username, std::string_view image_name, std::string_view container_name, std::string_view contract_dir, const ports &assigned_ports, instance_info &info);
+
+    int read_container_settings(std::string_view username, container_settings &settings);
+
+    int start_instance_setup(std::string_view username);
 
     int start_container(std::string_view container_name);
 
@@ -109,6 +127,12 @@ namespace hp
     void get_lease_list(std::vector<hp::lease_info> &leases);
 
     int get_instance(std::string &error_msg, std::string_view container_name, hp::instance_info &instance);
+
+    bool is_cgroup_v2();
+
+    bool cgroup_v2_ready();
+
+    bool cgroup_v1_ready();
 
     bool system_ready();
 

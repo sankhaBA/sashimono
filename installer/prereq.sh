@@ -2,10 +2,10 @@
 # Sashimono Ubuntu prerequisites installation script.
 # This must be executed with root privileges.
 
-# Adding user disk quota limitation capability
-# Enable user quota in fstab for root mount.
+# Adding group disk quota limitation capability
+# Enable group quota in fstab for root mount.
 # Enable cgroup memory and swapaccount capability.
-# Setup cgroups rules engine service.
+# Setup cgroups rules engine service (cgroup v1 only).
 
 echo "---Sashimono prerequisites installer---"
 
@@ -32,7 +32,7 @@ apt-get install -y uidmap fuse3 cgroup-tools quota curl openssl
 # uidmap        # Required for rootless docker.
 # slirp4netns   # Required for high performance rootless networking.
 # fuse3         # Required for hpfs.
-# cgroup-tools  # Required to setup contract instances resource limits.
+# cgroup-tools  # Required to setup contract instances resource limits (cgroup v1).
 # quota         # Required for disk space group quota.
 # curl          # Required to download installation artifacts.
 # openssl       # Required by Sashimono agent to create contract tls certs.
@@ -87,41 +87,51 @@ fi
 # We do not edit original file, instead we create a temp file with original and edit it.
 # Replace temp file with original only if success.
 
-# Check for pattern <Not starting with a comment><Not whitespace(Device)><Whitespace></><Whitespace><Not whitespace(FS type)><Whitespace><No whitespace(Options)><Whitespace><Number(Dump)><Whitespace><Number(Pass)>
-# And whether Options is <Not whitespace>*grpjquota=aquota.group or jqfmt=vfsv0<Not whitespace>*
-# If not add groupquota to the options.
+# Root entry pattern: <Not starting with a comment><Not whitespace(Device)><Whitespace></><Whitespace><Not whitespace(FS type)><Whitespace><No whitespace(Options)><Whitespace><Number(Dump)><Whitespace><Number(Pass)>
+# Options must contain grpquota. ext4 refuses to mount when grpquota is mixed with journaled quota options
+# (usrjquota, grpjquota, jqfmt), so those and other quota options are removed from the options.
+# Options are rewritten only if they differ from the expected ones.
 stage "Configuring fstab"
-updated=0
-sed -n -r -e "/^[^#]\S+\s+\/\s+\S+\s+\S+\s+[0-9]+\s+[0-9]+\s*/{ /^\S+\s+\/\s+\S+\s+\S*usrquota\S*/{q100} }" "$tmpfstab"
-res=$?
-if [ $res -eq 0 ]; then
-    sed -i -r -e "/^[^#]\S+\s+\/\s+\S+\s+\S+\s+[0-9]+\s+[0-9]+\s*/{ s/^\S+\s+\/\s+\S+\s+\S+/&,usrquota/ }" "$tmpfstab"
-    res=$?
-    updated=1
-fi
+root_entry="^[^#]\S+\s+\/\s+\S+\s+\S+\s+[0-9]+\s+[0-9]+\s*"
+root_opts=$(sed -n -r -e "/$root_entry/{ s/^\S+\s+\/\s+\S+\s+(\S+).*/\1/p; q }" "$tmpfstab")
+[ -z "$root_opts" ] && echo "Root (/) mount entry not found in fstab." && exit 1
 
-# If the res is not success(0) or already exist(100).
-[ ! $res -eq 0 ] && [ ! $res -eq 100 ] && echo "fstab update failed." && exit 1
+IFS=',' read -r -a opts <<<"$root_opts"
+new_opts=()
+has_grpquota=0
+for opt in "${opts[@]}"; do
+    case "$opt" in
+    grpquota)
+        new_opts+=("$opt")
+        has_grpquota=1
+        ;;
+    usrquota | usrjquota=* | grpjquota=* | jqfmt=* | quota | noquota) ;; # Cannot be mixed with grpquota.
+    *) new_opts+=("$opt") ;;
+    esac
+done
+[ $has_grpquota -eq 0 ] && new_opts+=("grpquota")
+new_root_opts=$(IFS=','; echo "${new_opts[*]}")
 
-# sed -n -r -e "/^[^#]\S+\s+\/\s+\S+\s+\S+\s+[0-9]+\s+[0-9]+\s*/{ /^\S+\s+\/\s+\S+\s+\S*jqfmt=vfsv0\S*/{q100} }" "$tmpfstab"
-# res=$?
-# if [ $res -eq 0 ]; then
-#     sed -i -r -e "/^[^#]\S+\s+\/\s+\S+\s+\S+\s+[0-9]+\s+[0-9]+\s*/{ s/^\S+\s+\/\s+\S+\s+\S+/&,jqfmt=vfsv0/ }" "$tmpfstab"
-#     res=$?
-#     updated=1
-# fi
+if [ "$new_root_opts" != "$root_opts" ]; then
+    echo "Updating root mount options from '$root_opts' to '$new_root_opts'."
+    escaped_opts=$(printf '%s' "$new_root_opts" | sed -e 's/[\/&]/\\&/g')
+    ! sed -i -r -e "/$root_entry/{ s/^(\S+\s+\/\s+\S+\s+)\S+/\1$escaped_opts/ }" "$tmpfstab" && echo "fstab update failed." && exit 1
 
-# If the res is not success(0) or alredy exist(100).
-[ ! $res -eq 0 ] && [ ! $res -eq 100 ] && echo "fstab update failed." && exit 1
-
-# If updated we do remount.
-if [ $updated -eq 1 ]; then
     # Create a backup of original, if remount failed replace updated with backup.
     cp $originalfstab $backup
     mv "$tmpfstab" $originalfstab
+    # Quota options cannot be changed while quota is on.
+    quotaoff -g / >/dev/null 2>&1
     if ! mount -o remount / 2>&1; then
+        # Journaled quota options of the current mount persist across remounts, so they can only be cleared with a reboot.
+        if findmnt -no OPTIONS / | grep -qE "usrjquota=|grpjquota=|jqfmt="; then
+            echo "Updated fstab, but the root filesystem is currently mounted with journaled quota options."
+            echo "Please reboot the machine and run the installation again." && exit 1
+        fi
         mv $backup $originalfstab
-        echo "Re mounting error." && exit 1
+        echo "Re mounting error."
+        dmesg | grep "EXT4-fs" | tail -n 3
+        exit 1
     fi
     echo "Updated fstab."
 else
@@ -129,9 +139,9 @@ else
 fi
 
 # Check and turn on group quota if not enabled.
-if [ ! -f /aquota.group ]; then
-    quotacheck -cum /
-    quotaon -u /
+[ ! -f /aquota.group ] && quotacheck -cgm /
+if ! quotaon -pg / 2>/dev/null | grep -q "is on"; then
+    ! quotaon -g / && echo "Enabling group quota failed." && exit 1
 fi
 
 # -------------------------------
@@ -186,19 +196,24 @@ fi
 # -------------------------------
 stage "Configuring cgroup rules engine"
 
-# Copy cgred.conf from examples if not exists to setup control groups.
-[ ! -f /etc/cgred.conf ] && cp /usr/share/doc/cgroup-tools/examples/cgred.conf /etc/
+# The cgroup rules engine is only required with cgroup v1.
+# With cgroup v2 (unified hierarchy) instance resources are limited using systemd user slices.
+if [ "$(stat -fc %T /sys/fs/cgroup/)" == "cgroup2fs" ]; then
+    echo "cgroup v2 detected. Skipping cgroup rules engine configuration."
+else
+    # Copy cgred.conf from examples if not exists to setup control groups.
+    [ ! -f /etc/cgred.conf ] && cp /usr/share/doc/cgroup-tools/examples/cgred.conf /etc/
 
-# Create new cgconfig.conf if not exists to setup control groups.
-[ ! -f /etc/cgconfig.conf ] && : >/etc/cgconfig.conf
+    # Create new cgconfig.conf if not exists to setup control groups.
+    [ ! -f /etc/cgconfig.conf ] && : >/etc/cgconfig.conf
 
-# Create new cgrules.conf if not exists to setup control groups.
-[ ! -f /etc/cgrules.conf ] && : >/etc/cgrules.conf
+    # Create new cgrules.conf if not exists to setup control groups.
+    [ ! -f /etc/cgrules.conf ] && : >/etc/cgrules.conf
 
-# Setup a service if not exists to run cgroup rules generator.
-cgrulesengd_file="/etc/systemd/system/$cgrulesengd_service.service"
-if ! [ -f "$cgrulesengd_file" ]; then
-    echo "[Unit]
+    # Setup a service if not exists to run cgroup rules generator.
+    cgrulesengd_file="/etc/systemd/system/$cgrulesengd_service.service"
+    if ! [ -f "$cgrulesengd_file" ]; then
+        echo "[Unit]
     Description=cgroups rules generator
     After=network.target
 
@@ -212,10 +227,11 @@ if ! [ -f "$cgrulesengd_file" ]; then
 
     [Install]
     WantedBy=multi-user.target" >$cgrulesengd_file
-    systemctl daemon-reload
+        systemctl daemon-reload
+    fi
+    systemctl enable $cgrulesengd_service
+    systemctl start $cgrulesengd_service
 fi
-systemctl enable $cgrulesengd_service
-systemctl start $cgrulesengd_service
 
 # -------------------------------
 stage "Configuring grub"
