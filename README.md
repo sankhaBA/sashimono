@@ -20,6 +20,21 @@ Tested on Ubuntu 20.04
 1. Reboot the machine.
 1. Run `./dev-setup.sh`
 
+### Contract instance resource limits (cgroups)
+
+Both cgroup v1 and cgroup v2 hosts are supported. The cgroup version is detected at runtime (`stat -fc %T /sys/fs/cgroup/` returns `cgroup2fs` on cgroup v2, hybrid setups are treated as cgroup v1).
+
+- **cgroup v1** - The cgroup rules engine (`cgrulesengd`) moves processes of the `sashiuser` group into per-user `<user>-cg` cgroups created by `user-cgcreate.sh`.
+- **cgroup v2** - Per-instance limits are applied on the systemd user slice of each instance user (`/etc/systemd/system/user-<uid>.slice.d/override.conf`). The cgroup rules engine is not used.
+
+In both cases the `sashimono-cgcreate` service re-applies the limits at system startup.
+
+### Contract instance network restrictions (nftables)
+
+`user-firewall.sh` applies a per-instance nftables table (`inet docker_filter_<uid>`) that blocks the instance's traffic to the host, the LAN, private networks, cloud metadata and multicast (IPv4 and IPv6). Replies to inbound connections, DNS, the instance and web ports on the host's own addresses and the NPMplus API are allowed.
+
+The rules are applied by `user-install.sh` when an instance is created, and the `sashimono-firewall` service re-applies them for all instances at system startup (and whenever `nftables.service` is restarted or reloaded). Nothing is written to `/etc/nftables.conf`.
+
 ## Build Sashimono Agent
 
 1. Run `git submodule update --init --recursive` to clone the bootstrap contract for first time.

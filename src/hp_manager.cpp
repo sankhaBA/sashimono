@@ -32,7 +32,12 @@ namespace hp
     // We keep docker logs at size limit of 10mb, We only need these logs for docker instance failure debugging since all other logs are kept in files.
     // For the local log driver compression, minimum max-file should be 2. So we keep two logs each max-size is 5mb
     constexpr const char *DOCKER_CREATE = "DOCKER_HOST=unix:///run/user/$(id -u %s)/docker.sock timeout --foreground -v -s SIGINT %ss %s/dockerbin/docker create -t -i --stop-signal=SIGINT --log-driver local \
-     --log-opt max-size=5m --log-opt max-file=2 --name=%s -p %s:%s -p %s:%s -p %s:%s/udp -p %s:%s -p %s:%s -p %s:%s/udp -p %s:%s/udp --restart unless-stopped --mount type=bind,source=%s,target=/contract %s run /contract";
+     --log-opt max-size=5m --log-opt max-file=2 --name=%s -p %s:%s -p %s:%s -p %s:%s/udp -p %s:%s -p %s:%s -p %s:%s/udp -p %s:%s/udp --restart unless-stopped --mount type=bind,source=%s,target=/contract --env-file %s %s%s";
+    constexpr const char *DOCKER_RUN_CONTRACT = " run /contract";
+    constexpr const char *INSTANCE_SETUP_START = "sudo -u %s XDG_RUNTIME_DIR=/run/user/$(id -u %s) systemctl --user start --no-block instance_setup";
+    // Files written by user-install.sh, relative to the instance user's home directory.
+    constexpr const char *CONTAINER_SETTINGS_FILE = "/.docker/container.cfg";
+    constexpr const char *ENV_VARS_FILE = "/.docker/env.vars";
     constexpr const char *DOCKER_START = "DOCKER_HOST=unix:///run/user/$(id -u %s)/docker.sock %s/dockerbin/docker start %s";
     constexpr const char *DOCKER_STOP = "DOCKER_HOST=unix:///run/user/$(id -u %s)/docker.sock %s/dockerbin/docker stop %s";
     constexpr const char *DOCKER_REMOVE = "DOCKER_HOST=unix:///run/user/$(id -u %s)/docker.sock %s/dockerbin/docker rm -f %s";
@@ -61,7 +66,13 @@ namespace hp
     constexpr const char *DOCKER_CONTAINER_NOT_FOUND = "container_not_found";
     constexpr const char *INSTANCE_ALREADY_EXISTS = "instance_already_exists";
 
-    // Cgrules check related constants.
+    // Cgroup check related constants.
+    constexpr const char *CGROUP_ROOT_DIR = "/sys/fs/cgroup";
+    constexpr const char *CGROUP_V2_CONTROLLERS = "/sys/fs/cgroup/cgroup.controllers";
+    constexpr const char *CGROUP_V2_CPU_REGEXP = "(^|\\s)cpu(\\s|$)";
+    constexpr const char *CGROUP_V2_MEM_REGEXP = "(^|\\s)memory(\\s|$)";
+
+    // Cgrules check related constants (cgroup v1).
     constexpr const char *CGRULE_ACTIVE = "service=$(grep \"ExecStart.*=.*/cgrulesengd$\" /etc/systemd/system/*.service | head -1 | awk -F : ' { print $1 } ') && [ ! -z $service ] && systemctl is-active $(basename $service)";
     constexpr const char *CGRULE_CPU_DIR = "/sys/fs/cgroup/cpu";
     constexpr const char *CGRULE_MEM_DIR = "/sys/fs/cgroup/memory";
@@ -165,7 +176,14 @@ namespace hp
         //     return -1;
         // }
 
-        std::string image_name = image;
+        // user-install.sh needs the full image name to read the tenant's settings. Docker needs it without them.
+        std::string docker_image;
+        if (strip_image_settings(image, docker_image) == -1)
+        {
+            error_msg = DOCKER_IMAGE_INVALID;
+            LOG_ERROR << "Provided docker image is not valid: " << image;
+            return -1;
+        }
 
         ports instance_ports;
         if (!vacant_ports.empty())
@@ -188,7 +206,7 @@ namespace hp
         std::string username;
         if (install_user(
                 user_id, username, instance_resources.cpu_us, instance_resources.mem_kbytes, instance_resources.swap_kbytes,
-                instance_resources.storage_kbytes, container_name, instance_ports, image_name, outbound_ipv6, outbound_net_interface) == -1)
+                instance_resources.storage_kbytes, container_name, instance_ports, image, outbound_ipv6, outbound_net_interface) == -1)
         {
             error_msg = USER_INSTALL_ERROR;
             return -1;
@@ -196,13 +214,9 @@ namespace hp
 
         const std::string contract_dir = util::get_user_contract_dir(username, container_name);
 
-        auto pos = image_name.find("--");
-        if (pos != std::string::npos) {
-            image_name = image_name.substr(0, pos);
-        }
-
         if (create_contract(username, owner_pubkey, contract_id, contract_dir, instance_ports, info) == -1 ||
-            create_container(username, image_name, container_name, contract_dir, instance_ports, info) == -1)
+            create_container(username, docker_image, container_name, contract_dir, instance_ports, info) == -1 ||
+            start_instance_setup(username) == -1)
         {
             error_msg = INSTANCE_ERROR;
             LOG_ERROR << "Error creating hp instance for " << owner_pubkey;
@@ -225,6 +239,45 @@ namespace hp
             vacant_ports.pop_back();
         else
             last_assigned_ports = instance_ports;
+
+        return 0;
+    }
+
+    /**
+     * Removes the tenant's custom settings from a docker image name.
+     * Tenants can add settings to the image tag, each one starting with "--", for example
+     * "evernode/sashimono:hp.latest--peer--1234--env1--KEY-value". user-install.sh reads them from the full name,
+     * but docker can't use that name, so the settings are removed before "docker create".
+     * Only the tag is searched. A "--" in the registry or repository part is valid in a docker name and is kept.
+     * @param image Docker image name as given by the tenant.
+     * @param docker_image Image name without the settings.
+     * @return 0 on success. -1 if the result is not a usable image name.
+     */
+    int strip_image_settings(std::string_view image, std::string &docker_image)
+    {
+        // The tag starts after the last ':', but only if that ':' comes after the last '/'.
+        // A ':' before the last '/' is a registry port, for example "host:5000/image".
+        const size_t last_slash = image.rfind('/');
+        const size_t tag_colon = image.rfind(':');
+        const bool has_tag = tag_colon != std::string_view::npos && (last_slash == std::string_view::npos || tag_colon > last_slash);
+
+        docker_image = image;
+        if (has_tag)
+        {
+            const std::string_view tag = image.substr(tag_colon + 1);
+            const size_t settings_pos = tag.find("--");
+            if (settings_pos != std::string_view::npos)
+            {
+                // A tag that only holds settings ("image:--peer--1234") means "latest". user-install.sh pulls the same.
+                const std::string_view version = tag.substr(0, settings_pos);
+                docker_image = std::string(image.substr(0, tag_colon + 1));
+                docker_image.append(version.empty() ? std::string_view("latest") : version);
+            }
+        }
+
+        // An empty name, or one starting with '-' (docker would read it as an option) or ':', can't be used.
+        if (docker_image.empty() || docker_image.front() == '-' || docker_image.front() == ':')
+            return -1;
 
         return 0;
     }
@@ -315,24 +368,40 @@ namespace hp
      */
     int create_container(std::string_view username, std::string_view image_name, std::string_view container_name, std::string_view contract_dir, const ports &assigned_ports, instance_info &info)
     {
+        container_settings settings;
+        if (read_container_settings(username, settings) == -1)
+            return -1;
+
         const std::string user_port = std::to_string(assigned_ports.user_port);
         const std::string peer_port = std::to_string(assigned_ports.peer_port);
         const std::string gp_tcp_port_1 = std::to_string(assigned_ports.gp_tcp_port_start);
         const std::string gp_tcp_port_2 = std::to_string(assigned_ports.gp_tcp_port_start + 1);
         const std::string gp_udp_port_1 = std::to_string(assigned_ports.gp_udp_port_start);
         const std::string gp_udp_port_2 = std::to_string(assigned_ports.gp_udp_port_start + 1);
+        const std::string internal_user_port = std::to_string(settings.user_port);
+        const std::string internal_peer_port = std::to_string(settings.peer_port);
+        const std::string internal_gp_tcp_port_1 = std::to_string(settings.gp_tcp_port_1);
+        const std::string internal_gp_tcp_port_2 = std::to_string(settings.gp_tcp_port_2);
+        const std::string internal_gp_udp_port_1 = std::to_string(settings.gp_udp_port_1);
+        const std::string internal_gp_udp_port_2 = std::to_string(settings.gp_udp_port_2);
+        const std::string env_vars_file = "/home/" + std::string(username) + ENV_VARS_FILE;
+        const std::string_view run_args = settings.run_contract ? DOCKER_RUN_CONTRACT : "";
         const std::string timeout = std::to_string(DOCKER_CREATE_TIMEOUT_SECS);
-        const int len = 376 + username.length() + timeout.length() + conf::ctx.exe_dir.length() + container_name.length() + (user_port.length() * 2) + (peer_port.length() * 4) + (gp_tcp_port_1.length() * 2) + (gp_tcp_port_2.length() * 2) + (gp_udp_port_1.length() * 2) + (gp_udp_port_2.length() * 2) + contract_dir.length() + image_name.length();
+        const int len = 385 + username.length() + timeout.length() + conf::ctx.exe_dir.length() + container_name.length() +
+                        user_port.length() + internal_user_port.length() + (peer_port.length() * 2) + (internal_peer_port.length() * 2) +
+                        gp_tcp_port_1.length() + internal_gp_tcp_port_1.length() + gp_tcp_port_2.length() + internal_gp_tcp_port_2.length() +
+                        gp_udp_port_1.length() + internal_gp_udp_port_1.length() + gp_udp_port_2.length() + internal_gp_udp_port_2.length() +
+                        contract_dir.length() + env_vars_file.length() + image_name.length() + run_args.length();
         char command[len];
         sprintf(command, DOCKER_CREATE, username.data(), timeout.data(), conf::ctx.exe_dir.data(), container_name.data(),
-                user_port.data(), user_port.data(),
-                peer_port.data(), peer_port.data(),
-                peer_port.data(), peer_port.data(),
-                gp_tcp_port_1.data(), gp_tcp_port_1.data(),
-                gp_tcp_port_2.data(), gp_tcp_port_2.data(),
-                gp_udp_port_1.data(), gp_udp_port_1.data(),
-                gp_udp_port_2.data(), gp_udp_port_2.data(),
-                contract_dir.data(), image_name.data());
+                user_port.data(), internal_user_port.data(),
+                peer_port.data(), internal_peer_port.data(),
+                peer_port.data(), internal_peer_port.data(),
+                gp_tcp_port_1.data(), internal_gp_tcp_port_1.data(),
+                gp_tcp_port_2.data(), internal_gp_tcp_port_2.data(),
+                gp_udp_port_1.data(), internal_gp_udp_port_1.data(),
+                gp_udp_port_2.data(), internal_gp_udp_port_2.data(),
+                contract_dir.data(), env_vars_file.data(), image_name.data(), run_args.data());
 
         LOG_INFO << "Creating the docker container. name: " << container_name;
         if (system(command) != 0)
@@ -344,6 +413,82 @@ namespace hp
         info.container_name = container_name;
         info.contract_dir = contract_dir;
         info.image_name = image_name;
+        return 0;
+    }
+
+    /**
+     * Reads the container side ports and command written by user-install.sh.
+     * @param username Username of the instance user.
+     * @param settings Container settings to be populated.
+     * @return 0 on success and -1 on error.
+     */
+    int read_container_settings(std::string_view username, container_settings &settings)
+    {
+        const std::string settings_file_path = "/home/" + std::string(username) + CONTAINER_SETTINGS_FILE;
+        const int settings_fd = open(settings_file_path.data(), O_RDONLY);
+        if (settings_fd == -1)
+        {
+            LOG_ERROR << errno << ": Error opening container settings file " << settings_file_path;
+            return -1;
+        }
+
+        jsoncons::ojson d;
+        const int res = util::read_json_file(settings_fd, d);
+        close(settings_fd);
+        if (res == -1)
+            return -1;
+
+        try
+        {
+            const std::vector<std::pair<const char *, uint16_t *>> port_fields = {
+                {"peer_port", &settings.peer_port},
+                {"user_port", &settings.user_port},
+                {"gp_tcp_port_1", &settings.gp_tcp_port_1},
+                {"gp_tcp_port_2", &settings.gp_tcp_port_2},
+                {"gp_udp_port_1", &settings.gp_udp_port_1},
+                {"gp_udp_port_2", &settings.gp_udp_port_2}};
+            for (const auto &[field, port] : port_fields)
+            {
+                if (!d[field].is<uint16_t>() || d[field].as<uint16_t>() == 0)
+                {
+                    LOG_ERROR << "Invalid " << field << " in container settings file " << settings_file_path;
+                    return -1;
+                }
+                *port = d[field].as<uint16_t>();
+            }
+
+            if (!d["run_contract"].is<bool>())
+            {
+                LOG_ERROR << "Invalid run_contract in container settings file " << settings_file_path;
+                return -1;
+            }
+            settings.run_contract = d["run_contract"].as<bool>();
+        }
+        catch (const std::exception &e)
+        {
+            LOG_ERROR << "Invalid container settings file " << settings_file_path << ". " << e.what();
+            return -1;
+        }
+
+        return 0;
+    }
+
+    /**
+     * Starts the instance setup service, which writes the contract's env.vars and sets up the instance's domain.
+     * It is not waited for, because the domain setup can take minutes.
+     * @param username Username of the instance user.
+     * @return 0 on success and -1 on error.
+     */
+    int start_instance_setup(std::string_view username)
+    {
+        const int len = 97 + (username.length() * 2);
+        char command[len];
+        sprintf(command, INSTANCE_SETUP_START, username.data(), username.data());
+        if (system(command) != 0)
+        {
+            LOG_ERROR << "Error starting the instance setup service of user " << username;
+            return -1;
+        }
         return 0;
     }
 
@@ -1099,10 +1244,66 @@ namespace hp
         }
     }
     /**
-     * Check whether there's a pending reboot and cgrules service is running and configured.
+     * Check whether the cgroup v2 (unified hierarchy) is mounted. Hybrid setups are treated as cgroup v1
+     * since the cpu and memory controllers are attached to the v1 hierarchies.
+     * @return true if cgroup v2 is mounted otherwise false.
+     */
+    bool is_cgroup_v2()
+    {
+        struct statfs buf;
+        if (statfs(CGROUP_ROOT_DIR, &buf) == -1)
+        {
+            LOG_ERROR << errno << ": Error checking the cgroup filesystem type.";
+            return false;
+        }
+
+        return buf.f_type == CGROUP2_SUPER_MAGIC;
+    }
+
+    /**
+     * Check whether cpu and memory controllers are available in cgroup v2. Resource limits are applied using
+     * systemd user slices, So the controllers need to be available in the root cgroup.
+     * @return true if available otherwise false.
+     */
+    bool cgroup_v2_ready()
+    {
+        const int fd = open(CGROUP_V2_CONTROLLERS, O_RDONLY);
+        if (fd == -1)
+        {
+            LOG_ERROR << errno << ": Error opening the cgroup controllers file.";
+            return false;
+        }
+
+        // cgroupfs files report st_size as 0, So we read until EOF instead of using util::read_from_fd.
+        std::string buf;
+        char chunk[256];
+        ssize_t res;
+        while ((res = read(fd, chunk, sizeof(chunk))) > 0)
+            buf.append(chunk, res);
+
+        if (res == -1)
+        {
+            LOG_ERROR << errno << ": Error reading the cgroup controllers file.";
+            close(fd);
+            return false;
+        }
+
+        close(fd);
+
+        if (!std::regex_search(buf, std::regex(CGROUP_V2_CPU_REGEXP)) || !std::regex_search(buf, std::regex(CGROUP_V2_MEM_REGEXP)))
+        {
+            LOG_ERROR << "Cgroup cpu or memory controller is not available.";
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Check whether cgrules service is running and configured (cgroup v1).
      * @return true if active and configured otherwise false.
      */
-    bool system_ready()
+    bool cgroup_v1_ready()
     {
         char buffer[20];
 
@@ -1147,16 +1348,29 @@ namespace hp
             return false;
         }
 
+        return true;
+    }
+
+    /**
+     * Check whether there's a pending reboot and cgroups are configured for resource limiting.
+     * @return true if ready otherwise false.
+     */
+    bool system_ready()
+    {
+        if (is_cgroup_v2() ? !cgroup_v2_ready() : !cgroup_v1_ready())
+            return false;
+
         // Check there's a pending reboot.
         if (util::is_file_exists(REBOOT_FILE))
         {
-            fd = open(REBOOT_FILE, O_RDONLY);
+            const int fd = open(REBOOT_FILE, O_RDONLY);
             if (fd == -1)
             {
                 LOG_ERROR << errno << ": Error opening the reboot file.";
                 return false;
             }
 
+            std::string buf;
             if (util::read_from_fd(fd, buf, 0) == -1)
             {
                 LOG_ERROR << errno << ": Error reading the reboot file.";
