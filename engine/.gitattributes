@@ -1,0 +1,2 @@
+# The engine scripts run on Linux hosts, so keep LF even on Windows checkouts.
+* text eol=lf

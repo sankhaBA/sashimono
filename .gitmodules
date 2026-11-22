@@ -4,4 +4,4 @@
 	branch = release
 [submodule "reputationd"]
 	path = reputationd
-	url = https://github.com/EvernodeXRPL/reputationd
+	url = https://github.com/sankhaBA/reputationd
