@@ -45,7 +45,7 @@ appenv = {
     ORPHAN_PRUNE_SCHEDULER_INTERVAL_HOURS: 2,
     SASHIMONO_SCHEDULER_INTERVAL_SECONDS: 2,
     SASHI_CLI_PATH: appenv.IS_DEV_MODE ? "../build/sashi" : "/usr/bin/sashi",
-    MB_VERSION: '0.12.1',
+    MB_VERSION: '0.13.0',
     TOS_HASH: '0801677EBCB2F76EF97D531549D8B27DB2C7A4A8EE7F60032AE40184247F0810', // This is the sha256 hash of EVERNODE-HOSTING-PRINCIPLES.pdf.
     NETWORK: 'mainnet',
     REPUTATIOND_CONFIG_PATH: path.join(appenv.DATA_DIR, '../') + "reputationd/reputationd.cfg",

@@ -29,7 +29,7 @@
 
     repo_owner="sankhaBA"
     repo_name="evernode-resources"
-    desired_branch="main"
+    desired_branch="main.ci-implementation"  # Test period only: the engine policy block is on this branch. Set back to "main" before release.
 
     # Reputation modes : 0 - "none", 1 - "OneToOne", 2 - "OneToMany"
     is_fresh_reputation_acc=false
