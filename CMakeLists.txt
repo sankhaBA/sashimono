@@ -64,7 +64,8 @@ add_dependencies(sagent
 
 add_custom_command(TARGET sagent POST_BUILD
     COMMAND bash -c "cp -r ./dependencies/{user-install.sh,user-firewall.sh,dns_evernode.sh,user-uninstall.sh} ./build/"
-    COMMAND bash -c "rm -rf ./build/engine && cp -r ./engine ./build/engine"
+    COMMAND rm -rf ./build/engine
+    COMMAND cp -r ./engine ./build/engine
     COMMAND tar xf ./dependencies/contract_template.tar -C ./build/ --no-same-owner
     COMMAND cp ./dependencies/hp.cfg ./build/contract_template/cfg/
     COMMAND cp ./evernode-bootstrap-contract/src/bootstrap_upgrade.sh ./build/contract_template/contract_fs/seed/state/
