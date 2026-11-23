@@ -32,6 +32,17 @@ fallback_rippled_servers=${24}
 script_dir=$(dirname "$(realpath "$0")")
 # Fallback for upgrades started from a setup.sh older than the firewall service.
 FIREWALL_SERVICE=${FIREWALL_SERVICE:-sashimono-firewall}
+# Fallbacks for upgrades started from a setup.sh older than host engine builds (that setup.sh drives the upgrade).
+# The two release-specific values are rewritten by .github/workflows/release.yml, as it does for setup.sh.
+engine_repo_owner="sankhaBA"
+engine_definitions_url="https://raw.githubusercontent.com/sankhaBA/evernode-resources/main.ci-implementation/definitions/definitions.json"
+ENGINE_UPDATE_SERVICE=${ENGINE_UPDATE_SERVICE:-sashimono-engine-update}
+ENGINE_CONFIG=${ENGINE_CONFIG:-$SASHIMONO_DATA/engine.cfg}
+ENGINE_REPO_OWNER=${ENGINE_REPO_OWNER:-$engine_repo_owner}
+EVERNODE_DEFINITIONS_URL=${EVERNODE_DEFINITIONS_URL:-$engine_definitions_url}
+ENGINE_DATA_DIR=${ENGINE_DATA_DIR:-/var/lib/sashimono/engine}
+HP_BUILDS_DIR=${HP_BUILDS_DIR:-/var/lib/sashimono/hp-builds}
+BUILDER_USER=${BUILDER_USER:-sashibuilder}
 desired_slirp4netns_version="1.2.1"
 desired_acme_sh_version="3.1.6"
 desired_acme_sh_sha256="c7d68b021cfd6380ea83a82962abde5b484779fee0b97d38681dfa1396bbc8d7"
@@ -319,6 +330,13 @@ function check_dependencies() {
         ! apt-get -y install nftables >/dev/null && echo "Error when installing nftables." && abort
     fi
 
+    # The engine builds fetch sources with git and keep their state in JSON.
+    if ! command -v git &>/dev/null || ! command -v jq &>/dev/null; then
+        stage "Installing git and jq"
+        apt-get update >/dev/null
+        ! apt-get -y install git jq >/dev/null && echo "Error when installing git and jq." && abort
+    fi
+
     stage "Setting up acme.sh"
     if curl -o "$SASHIMONO_BIN/acme.sh" --fail -sL -m 60 https://raw.githubusercontent.com/acmesh-official/acme.sh/$desired_acme_sh_version/acme.sh &&
         sha256sum --status -c <<<"$desired_acme_sh_sha256  $SASHIMONO_BIN/acme.sh"; then
@@ -479,6 +497,109 @@ function upgrade() {
     return 0
 }
 
+# Unprivileged user that fetches and compiles the engine in its own rootless Docker.
+# Its systemd slice caps CPU and memory for the daemon and every container it starts.
+function setup_engine_builder() {
+    stage "Setting up the HotPocket engine builder"
+    if ! id "$BUILDER_USER" &>/dev/null; then
+        useradd --shell /usr/sbin/nologin -m "$BUILDER_USER" || return 1
+        usermod --lock "$BUILDER_USER"
+    fi
+    loginctl enable-linger "$BUILDER_USER"
+
+    local uid cpu_quota memory_max
+    uid=$(id -u "$BUILDER_USER") || return 1
+    cpu_quota=$(jq -r '.builder.cpu_quota_percent' "$ENGINE_CONFIG") || return 1
+    memory_max=$(jq -r '.builder.memory_max_mb' "$ENGINE_CONFIG") || return 1
+    mkdir -p "/etc/systemd/system/user-$uid.slice.d"
+    echo "[Slice]
+CPUQuota=${cpu_quota}%
+MemoryMax=${memory_max}M
+MemoryLimit=${memory_max}M
+CPUWeight=10
+IOWeight=10" >"/etc/systemd/system/user-$uid.slice.d/override.conf"
+    systemctl daemon-reload
+
+    # Wait for the user's systemd, as user-install.sh does for instance users.
+    local user_runtime_dir="/run/user/$uid"
+    local i
+    for i in {1..30}; do
+        sudo -u "$BUILDER_USER" XDG_RUNTIME_DIR="$user_runtime_dir" systemctl --user is-system-running &>/dev/null && break
+        sleep 1
+    done
+
+    sudo -H -u "$BUILDER_USER" PATH="$DOCKER_BIN:$PATH" XDG_RUNTIME_DIR="$user_runtime_dir" \
+        "$DOCKER_BIN"/dockerd-rootless-setuptool.sh install || return 1
+
+    # Builds run at the lowest priority, so tenants always win the CPU.
+    local override_dir="/home/$BUILDER_USER/.config/systemd/user/docker.service.d"
+    sudo -u "$BUILDER_USER" mkdir -p "$override_dir"
+    echo "[Service]
+Nice=19
+IOSchedulingClass=idle" | sudo -u "$BUILDER_USER" tee "$override_dir/engine.conf" >/dev/null
+    sudo -u "$BUILDER_USER" XDG_RUNTIME_DIR="$user_runtime_dir" systemctl --user daemon-reload
+    sudo -u "$BUILDER_USER" XDG_RUNTIME_DIR="$user_runtime_dir" systemctl --user restart docker
+
+    mkdir -p "$HP_BUILDS_DIR" "$ENGINE_DATA_DIR/legacy"
+    chmod 0755 "$HP_BUILDS_DIR" "$ENGINE_DATA_DIR"
+    install -d -m 0750 -o "$BUILDER_USER" -g "$BUILDER_USER" "$ENGINE_DATA_DIR/work"
+    return 0
+}
+
+# Written once. Upgrades keep the operator's choices.
+function write_engine_config() {
+    [ -f "$ENGINE_CONFIG" ] && return 0
+    local host_os
+    case "$(grep -oP '^VERSION_ID="\K[^"]+' /etc/os-release)" in
+    20.04) host_os=ubt20 ;;
+    24.04) host_os=ubt24 ;;
+    *) echo "Unsupported Ubuntu version for engine builds." && return 1 ;;
+    esac
+    jq -n --arg network "$NETWORK" --arg url "$EVERNODE_DEFINITIONS_URL" --arg owner "$ENGINE_REPO_OWNER" --arg host_os "$host_os" \
+        '{schema: 1, network: $network, definitions_url: $url,
+          repos: {hpcore: "\($owner)/hpcore", hpfs: "\($owner)/hpfs", hpws: "\($owner)/hpws"},
+          host_os: $host_os, allow_prerelease: false,
+          builder: {jobs: 1, cpu_quota_percent: 100, memory_max_mb: 3072}}' >"$ENGINE_CONFIG"
+}
+
+# Hosts upgraded from a version that shipped hpfs keep that binary for their existing instances.
+function preserve_legacy_hpfs() {
+    local shared="$SASHIMONO_BIN/hpfs"
+    [ -f "$shared" ] && [ ! -L "$shared" ] || return 0
+    mv "$shared" "$ENGINE_DATA_DIR/legacy/hpfs"
+    ln -s "$ENGINE_DATA_DIR/legacy/hpfs" "$shared"
+}
+
+function setup_engine_timer() {
+    echo "[Unit]
+Description=Checks for HotPocket engine releases and builds them.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$SASHIMONO_BIN/engine/hp-build.sh update
+Nice=19
+IOSchedulingClass=idle
+TimeoutStartSec=4h" >"/etc/systemd/system/$ENGINE_UPDATE_SERVICE.service"
+
+    echo "[Unit]
+Description=Hourly HotPocket engine release check.
+
+[Timer]
+Unit=$ENGINE_UPDATE_SERVICE.service
+OnCalendar=hourly
+# Spread hosts over ten minutes so they don't all call GitHub at once.
+RandomizedDelaySec=600
+Persistent=true
+
+[Install]
+WantedBy=timers.target" >"/etc/systemd/system/$ENGINE_UPDATE_SERVICE.timer"
+
+    systemctl daemon-reload
+    systemctl enable --now "$ENGINE_UPDATE_SERVICE.timer"
+}
+
 # Check cgroup rule config exists (Only required with cgroup v1).
 ! is_cgroup_v2 && [ ! -f /etc/cgred.conf ] && echo "cgroups is not configured. Make sure you've installed and configured cgroup-tools." && exit 1
 
@@ -517,7 +638,10 @@ rm -r "$tmp"
         -out $SASHIMONO_DATA/contract_template/cfg/tlscert.pem -subj "/C=HP/CN=$(jq -r '.hp.host_address' $SASHIMONO_DATA/sa.cfg)"
 
 # Install Sashimono agent binaries into sashimono bin dir.
-cp "$script_dir"/{sagent,hpfs,user-cgcreate.sh,user-firewall.sh,user-install.sh,dns_evernode.sh,user-uninstall.sh,docker-registry-uninstall.sh} $SASHIMONO_BIN
+mkdir -p "$ENGINE_DATA_DIR/legacy"
+preserve_legacy_hpfs
+cp "$script_dir"/{sagent,user-cgcreate.sh,user-firewall.sh,user-install.sh,dns_evernode.sh,user-uninstall.sh,docker-registry-uninstall.sh} "$SASHIMONO_BIN"
+rm -rf "$SASHIMONO_BIN/engine" && cp -r "$script_dir/engine" "$SASHIMONO_BIN/"
 chmod -R +x $SASHIMONO_BIN
 
 # Setup tls certs used for contract instance websockets.
@@ -526,8 +650,7 @@ chmod -R +x $SASHIMONO_BIN
 # Update renewal of tls certs used for contract instance websockets.
 [ "$UPGRADE" == "1" ] && setup_certbot_renewal
 
-# Copy Blake3 and update linker library cache.
-[ ! -f /usr/local/lib/libblake3.so ] && cp "$script_dir"/libblake3.so /usr/local/lib/ && ldconfig
+# libblake3.so is no longer shipped. Hosts that have it keep it for the legacy hpfs.
 
 # Install Sashimono CLI binaries into user bin dir.
 cp "$script_dir"/sashi $USER_BIN
@@ -543,6 +666,18 @@ mkdir -p $DOCKER_BIN
 
 # Check whether docker installation dir is still empty.
 [ -z "$(ls -A $DOCKER_BIN 2>/dev/null)" ] && echo "Rootless Docker installation failed." && abort
+
+# The engine builder needs the rootless Docker binaries installed above.
+! write_engine_config && echo "Writing the engine config failed" && abort
+! setup_engine_builder && echo "ENGINE_BUILDER_SETUP_FAILURE" && abort
+
+# First build before leases are offered (design §6). A failure here doesn't stop the install:
+# mb-xrpl keeps leases unoffered until a build is ready, and the timer keeps retrying.
+stage "Building the HotPocket engine from source. This takes a while on the first run."
+if ! "$SASHIMONO_BIN"/engine/hp-build.sh update; then
+    echo "The first engine build did not finish. The host retries every hour and offers leases once a build is ready."
+fi
+setup_engine_timer
 
 # Install private docker registry.
 if [ "$DOCKER_REGISTRY_PORT" != "0" ]; then

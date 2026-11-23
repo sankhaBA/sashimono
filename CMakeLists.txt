@@ -63,7 +63,8 @@ add_dependencies(sagent
 )
 
 add_custom_command(TARGET sagent POST_BUILD
-    COMMAND bash -c "cp -r ./dependencies/{hpfs,user-install.sh,user-firewall.sh,dns_evernode.sh,user-uninstall.sh} ./build/"
+    COMMAND bash -c "cp -r ./dependencies/{user-install.sh,user-firewall.sh,dns_evernode.sh,user-uninstall.sh} ./build/"
+    COMMAND bash -c "rm -rf ./build/engine && cp -r ./engine ./build/engine"
     COMMAND tar xf ./dependencies/contract_template.tar -C ./build/ --no-same-owner
     COMMAND cp ./dependencies/hp.cfg ./build/contract_template/cfg/
     COMMAND cp ./evernode-bootstrap-contract/src/bootstrap_upgrade.sh ./build/contract_template/contract_fs/seed/state/
@@ -79,9 +80,9 @@ target_precompile_headers(sagent PUBLIC src/pchheader.hpp)
 # Add target to generate the installer setup.
 add_custom_target(installer
   COMMAND mkdir -p ./build/installer
-  COMMAND bash -c "cp -r ./build/{sagent,sashi,hpfs,user-install.sh,user-firewall.sh,dns_evernode.sh,user-uninstall.sh,contract_template} ./build/installer/"
+  COMMAND bash -c "cp -r ./build/{sagent,sashi,engine,user-install.sh,user-firewall.sh,dns_evernode.sh,user-uninstall.sh,contract_template} ./build/installer/"
   COMMAND bash -c "cp -r ./installer/{docker-install.sh,docker-registry-install.sh,docker-registry-uninstall.sh,prereq.sh,sashimono-install.sh,sashimono-uninstall.sh} ./build/installer/"
-  COMMAND bash -c "cp -r ./dependencies/{user-cgcreate.sh,libblake3.so} ./build/installer/"
+  COMMAND bash -c "cp -r ./dependencies/user-cgcreate.sh ./build/installer/"
   COMMAND bash -c "cp -r ./evernode-license.pdf ./build/installer/"
   COMMAND bash -c "cp -r ./mb-xrpl/dist ./build/installer/mb-xrpl"
   COMMAND bash -c "cp -r ./reputationd/dist ./build/installer/reputationd"

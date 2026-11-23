@@ -80,8 +80,6 @@ sudo apt-get install -y \
     jq \
     bind9-host
 
-sudo cp $scriptdir/dependencies/libblake3.so /usr/local/lib/
-
 # NodeJs
 apt-get install -y ca-certificates curl gnupg
 mkdir -p /etc/apt/keyrings

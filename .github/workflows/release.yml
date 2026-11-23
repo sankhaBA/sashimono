@@ -16,6 +16,7 @@ concurrency:
 env:
   RESOURCES_REPO: ${{ vars.RESOURCES_REPO }}
   RELEASE_BRANCH: ${{ vars.RELEASE_BRANCH }}
+  ENGINE_REPO_OWNER: ${{ vars.ENGINE_REPO_OWNER }}
 
 jobs:
   build:
@@ -29,6 +30,7 @@ jobs:
         run: |
           : "${RESOURCES_REPO:?Repository variable RESOURCES_REPO is not set}"
           : "${RELEASE_BRANCH:?Repository variable RELEASE_BRANCH is not set}"
+          : "${ENGINE_REPO_OWNER:?Repository variable ENGINE_REPO_OWNER is not set}"
 
       - name: Install git
         run: |
@@ -51,6 +53,18 @@ jobs:
       - name: Install build dependencies
         run: .github/scripts/install-build-deps.sh
 
+      # Upgrades from an older setup.sh run this installer without the engine exports, so it carries its own defaults.
+      - name: Stamp engine defaults into the installer
+        run: |
+          branch=$(grep -oP '^[[:space:]]*desired_branch="\K[^"]+' installer/setup.sh)
+          definitions_url="https://raw.githubusercontent.com/${RESOURCES_REPO}/${branch}/definitions/definitions.json"
+          sed -i -E \
+            -e "s|^(engine_repo_owner=)\"[^\"]*\"|\1\"${ENGINE_REPO_OWNER}\"|" \
+            -e "s|^(engine_definitions_url=)\"[^\"]*\"|\1\"${definitions_url}\"|" \
+            installer/sashimono-install.sh
+          grep -Eq "^engine_repo_owner=\"${ENGINE_REPO_OWNER}\"$" installer/sashimono-install.sh
+          grep -Fxq "engine_definitions_url=\"${definitions_url}\"" installer/sashimono-install.sh
+
       - name: Build
         run: |
           cmake .
@@ -66,9 +80,11 @@ jobs:
           sed -E \
             -e "s|^([[:space:]]*repo_owner=).*|\1\"${owner}\"|" \
             -e "s|^([[:space:]]*repo_name=).*|\1\"${name}\"|" \
+            -e "s|^([[:space:]]*engine_repo_owner=)\"[^\"]*\"|\1\"${ENGINE_REPO_OWNER}\"|" \
             installer/setup.sh >dist/setup.sh
           grep -Eq "^[[:space:]]*repo_owner=\"${owner}\"$" dist/setup.sh
           grep -Eq "^[[:space:]]*repo_name=\"${name}\"$" dist/setup.sh
+          grep -Eq "^[[:space:]]*engine_repo_owner=\"${ENGINE_REPO_OWNER}\"" dist/setup.sh
           (cd dist && sha256sum installer.tar.gz setup-jshelper.tar.gz setup.sh >SHA256SUMS)
 
       - name: Upload release assets

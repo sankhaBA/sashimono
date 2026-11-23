@@ -20,6 +20,7 @@
     min_ipv6_prefix_len=64
     min_lease_amt=0.000001
     min_disk_mb=1000
+    engine_build_disk_kb=3000000 # Engine builds: two builder images, two smoke images, four builds and the source cache.
     min_ram_mb=500
     min_swap_mb=0
     evernode_alias=/usr/bin/evernode
@@ -30,6 +31,7 @@
     repo_owner="sankhaBA"
     repo_name="evernode-resources"
     desired_branch="main.ci-implementation"  # Test period only: the engine policy block is on this branch. Set back to "main" before release.
+    engine_repo_owner="sankhaBA"     # Rewritten by .github/workflows/release.yml from vars.ENGINE_REPO_OWNER.
 
     # Reputation modes : 0 - "none", 1 - "OneToOne", 2 - "OneToMany"
     is_fresh_reputation_acc=false
@@ -98,6 +100,13 @@
     export REPUTATIOND_USER="sashireputationd"
     export CG_SUFFIX="-cg"
     export EVERNODE_AUTO_UPDATE_SERVICE="evernode-auto-update"
+    export ENGINE_UPDATE_SERVICE="sashimono-engine-update"
+    export ENGINE_CONFIG="$SASHIMONO_DATA/engine.cfg"
+    export ENGINE_REPO_OWNER="$engine_repo_owner"
+    export EVERNODE_DEFINITIONS_URL="$config_url"
+    export ENGINE_DATA_DIR="/var/lib/sashimono/engine"
+    export HP_BUILDS_DIR="/var/lib/sashimono/hp-builds"
+    export BUILDER_USER="sashibuilder"
     export MIN_OPERATIONAL_COST_PER_MONTH=5
     # 3 Month minimum operational duration is considered.
     export MIN_OPERATIONAL_DURATION=3
@@ -202,7 +211,7 @@
             echo "$evernode is already installed on your host. You cannot deregister without uninstalling. Use the 'evernode' command to manage your host." &&
             exit 1
 
-        [ "$1" != "uninstall" ] && [ "$1" != "status" ] && [ "$1" != "list" ] && [ "$1" != "update" ] && [ "$1" != "log" ] && [ "$1" != "applyssl" ] && [ "$1" != "transfer" ] && [ "$1" != "config" ] && [ "$1" != "delete" ] && [ "$1" != "governance" ] && [ "$1" != "regkey" ] && [ "$1" != "offerlease" ] && [ "$1" != "reputationd" ] &&
+        [ "$1" != "uninstall" ] && [ "$1" != "status" ] && [ "$1" != "list" ] && [ "$1" != "update" ] && [ "$1" != "log" ] && [ "$1" != "applyssl" ] && [ "$1" != "transfer" ] && [ "$1" != "config" ] && [ "$1" != "delete" ] && [ "$1" != "governance" ] && [ "$1" != "regkey" ] && [ "$1" != "offerlease" ] && [ "$1" != "reputationd" ] && [ "$1" != "engine" ] &&
             echomult "$evernode host management tool
                 \nYour have $evernode installed on your machine.
                 \nSupported commands:
@@ -218,7 +227,8 @@
                 \ngovernance - Governance candidate management.
                 \nregkey - Regular key management.
                 \nofferlease - Create Lease offers for the instances.
-                \nreputationd - opt-in / opt-out for the Evernode reputation for reward distribution." &&
+                \nreputationd - opt-in / opt-out for the Evernode reputation for reward distribution.
+                \nengine - HotPocket engine build status and management." &&
             exit 1
     else
         [ "$1" != "install" ] && [ "$1" != "transfer" ] && [ "$1" != "deregister" ] &&
@@ -325,14 +335,15 @@
         ([ "$os" != "ubuntu" ] || [ "$osversion" != '"20.04"' ]) && errors=" OS: $os $osversion (required: Ubuntu 20.04)\n"
         [ $ramKB -lt 2000000 ] && errors="$errors RAM: $(GB $ramKB) (required: 2 GB RAM)\n"
         [ $swapKB -lt 2000000 ] && errors="$errors Swap: $(GB $swapKB) (required: 2 GB Swap)\n"
-        [ $diskKB -lt 4000000 ] && errors="$errors Disk space (/home): $(GB $diskKB) (required: 4 GB)\n"
+        local min_diskKB=$((4000000 + engine_build_disk_kb))
+        [ "$diskKB" -lt "$min_diskKB" ] && errors="$errors Disk space (/home): $(GB "$diskKB") (required: $(GB "$min_diskKB"))\n"
 
         if [ -z "$errors" ]; then
             echo "System check complete. Your system is capable of becoming an $evernode host."
         else
             echomult "Your system does not meet following $evernode system requirements:\n $errors"
             echomult "$evernode host registration requires Ubuntu 20.04 with minimum 2 GB RAM,
-            2 GB Swap and 4 GB free disk space for /home. Aborting setup."
+            2 GB Swap and $(GB "$min_diskKB") free disk space for /home. Aborting setup."
             exit 1
         fi
     }
@@ -2646,6 +2657,29 @@ WantedBy=timers.target" >/etc/systemd/system/$EVERNODE_AUTO_UPDATE_SERVICE.timer
             \nopt-out - Opt out from the Evernode reputation for reward distribution.
             \nstatus - Check the status of Evernode reputation for reward distribution." && exit 1
         fi
+
+    elif [ "$mode" == "engine" ]; then
+        [ "$EUID" -ne 0 ] && echo "Please run with root privileges (sudo)." && exit 1
+
+        case "$2" in
+        status) "$SASHIMONO_BIN"/engine/hp-build.sh status ;;
+        update)
+            systemctl start "$ENGINE_UPDATE_SERVICE"
+            journalctl -u "$ENGINE_UPDATE_SERVICE" -n 30 --no-pager
+            ;;
+        prerelease)
+            [[ "$3" == "on" || "$3" == "off" ]] || { echomult "Usage: evernode engine prerelease on|off"; exit 1; }
+            engine_cfg_tmp=$(mktemp)
+            if jq --argjson v "$([ "$3" == "on" ] && echo true || echo false)" '.allow_prerelease = $v' "$ENGINE_CONFIG" >"$engine_cfg_tmp" &&
+                mv "$engine_cfg_tmp" "$ENGINE_CONFIG" && chmod 0644 "$ENGINE_CONFIG"; then
+                echo "Pre-release builds are now $3. This only has an effect on networks that allow them."
+            else
+                rm -f "$engine_cfg_tmp"
+                echo "Updating the engine config failed." && exit 1
+            fi
+            ;;
+        *) echomult "Usage: evernode engine status | update | prerelease on|off" && exit 1 ;;
+        esac
     fi
 
     $installed && check_installer_pending_finish

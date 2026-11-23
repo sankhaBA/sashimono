@@ -5,6 +5,9 @@
 export TRANSFER=${TRANSFER:-0}
 # Fallback for uninstalls started from a setup.sh older than the firewall service.
 FIREWALL_SERVICE=${FIREWALL_SERVICE:-sashimono-firewall}
+# Fallbacks for uninstalls started from a setup.sh older than host engine builds.
+ENGINE_UPDATE_SERVICE=${ENGINE_UPDATE_SERVICE:-sashimono-engine-update}
+BUILDER_USER=${BUILDER_USER:-sashibuilder}
 
 mb_cli_exit_success="MB_CLI_SUCCESS"
 mb_cli_out_prefix="CLI_OUT"
@@ -285,6 +288,22 @@ systemctl stop $SASHIMONO_SERVICE
 systemctl disable $SASHIMONO_SERVICE
 service_path="/etc/systemd/system/$SASHIMONO_SERVICE.service"
 rm $service_path
+
+echo "Removing the HotPocket engine update timer..."
+systemctl disable --now "$ENGINE_UPDATE_SERVICE.timer" >/dev/null 2>&1
+rm -f "/etc/systemd/system/$ENGINE_UPDATE_SERVICE".{service,timer}
+
+if [ "$UPGRADE" == "0" ] && id "$BUILDER_USER" &>/dev/null; then
+    echo "Removing the HotPocket engine builder."
+    builder_uid=$(id -u "$BUILDER_USER")
+    sudo -H -u "$BUILDER_USER" PATH="$DOCKER_BIN:$PATH" XDG_RUNTIME_DIR="/run/user/$builder_uid" \
+        "$DOCKER_BIN"/dockerd-rootless-setuptool.sh uninstall >/dev/null 2>&1
+    loginctl disable-linger "$BUILDER_USER"
+    pkill -u "$BUILDER_USER" >/dev/null 2>&1
+    userdel -r "$BUILDER_USER" >/dev/null 2>&1
+    rm -rf "/etc/systemd/system/user-$builder_uid.slice.d"
+    rm -rf /var/lib/sashimono
+fi
 
 # Reload the systemd daemon after removing the service
 systemctl daemon-reload
