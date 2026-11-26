@@ -555,7 +555,11 @@ function write_engine_config() {
     24.04) host_os=ubt24 ;;
     *) echo "Unsupported Ubuntu version for engine builds." && return 1 ;;
     esac
-    jq -n --arg network "$NETWORK" --arg url "$EVERNODE_DEFINITIONS_URL" --arg owner "$ENGINE_REPO_OWNER" --arg host_os "$host_os" \
+
+    local engine_network="$NETWORK" mb_cfg="${MB_XRPL_CONFIG:-/etc/sashimono/mb-xrpl/mb-xrpl.cfg}" registered
+    [ -f "$mb_cfg" ] && registered=$(jq -r '.xrpl.network // empty' "$mb_cfg" 2>/dev/null) && [ -n "$registered" ] && engine_network="$registered"
+    [ -z "$engine_network" ] && echo "Could not determine the network for engine builds." && return 1
+    jq -n --arg network "$engine_network" --arg url "$EVERNODE_DEFINITIONS_URL" --arg owner "$ENGINE_REPO_OWNER" --arg host_os "$host_os" \
         '{schema: 1, network: $network, definitions_url: $url,
           repos: {hpcore: "\($owner)/hpcore", hpfs: "\($owner)/hpfs", hpws: "\($owner)/hpws"},
           host_os: $host_os, allow_prerelease: false,
