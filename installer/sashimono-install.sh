@@ -546,19 +546,34 @@ IOSchedulingClass=idle" | sudo -u "$BUILDER_USER" tee "$override_dir/engine.conf
     return 0
 }
 
-# Written once. Upgrades keep the operator's choices.
+# Written once. Upgrades keep the operator's choices, except the network, which always follows the host registration.
+# An older setup.sh drives upgrades with its default NETWORK (mainnet), so the registration in mb-xrpl.cfg wins.
 function write_engine_config() {
-    [ -f "$ENGINE_CONFIG" ] && return 0
+    local engine_network="$NETWORK" mb_cfg="${MB_XRPL_CONFIG:-/etc/sashimono/mb-xrpl/mb-xrpl.cfg}" registered
+    [ -f "$mb_cfg" ] && registered=$(jq -r '.xrpl.network // empty' "$mb_cfg" 2>/dev/null) && [ -n "$registered" ] && engine_network="$registered"
+    [ -z "$engine_network" ] && echo "Could not determine the network for engine builds." && return 1
+
+    if [ -f "$ENGINE_CONFIG" ]; then
+        # Repairs testnet and devnet hosts that ES0.13.0-rc1 upgraded with network mainnet.
+        [ -n "$registered" ] || return 0
+        [ "$(jq -r '.network // empty' "$ENGINE_CONFIG")" == "$registered" ] && return 0
+        local tmp
+        tmp=$(mktemp) || return 1
+        if ! jq --arg network "$registered" '.network = $network' "$ENGINE_CONFIG" >"$tmp" ||
+            ! mv "$tmp" "$ENGINE_CONFIG" || ! chmod 0644 "$ENGINE_CONFIG"; then
+            rm -f "$tmp"
+            return 1
+        fi
+        echo "Engine network set to $registered to match the host registration."
+        return 0
+    fi
+
     local host_os
     case "$(grep -oP '^VERSION_ID="\K[^"]+' /etc/os-release)" in
     20.04) host_os=ubt20 ;;
     24.04) host_os=ubt24 ;;
     *) echo "Unsupported Ubuntu version for engine builds." && return 1 ;;
     esac
-
-    local engine_network="$NETWORK" mb_cfg="${MB_XRPL_CONFIG:-/etc/sashimono/mb-xrpl/mb-xrpl.cfg}" registered
-    [ -f "$mb_cfg" ] && registered=$(jq -r '.xrpl.network // empty' "$mb_cfg" 2>/dev/null) && [ -n "$registered" ] && engine_network="$registered"
-    [ -z "$engine_network" ] && echo "Could not determine the network for engine builds." && return 1
     jq -n --arg network "$engine_network" --arg url "$EVERNODE_DEFINITIONS_URL" --arg owner "$ENGINE_REPO_OWNER" --arg host_os "$host_os" \
         '{schema: 1, network: $network, definitions_url: $url,
           repos: {hpcore: "\($owner)/hpcore", hpfs: "\($owner)/hpfs", hpws: "\($owner)/hpws"},
