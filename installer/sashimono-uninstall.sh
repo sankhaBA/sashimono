@@ -299,8 +299,16 @@ if [ "$UPGRADE" == "0" ] && id "$BUILDER_USER" &>/dev/null; then
     sudo -H -u "$BUILDER_USER" PATH="$DOCKER_BIN:$PATH" XDG_RUNTIME_DIR="/run/user/$builder_uid" \
         "$DOCKER_BIN"/dockerd-rootless-setuptool.sh uninstall >/dev/null 2>&1
     loginctl disable-linger "$BUILDER_USER"
+    loginctl terminate-user "$BUILDER_USER" >/dev/null 2>&1
     pkill -u "$BUILDER_USER" >/dev/null 2>&1
-    userdel -r "$BUILDER_USER" >/dev/null 2>&1
+    # userdel refuses while the user's systemd and rootless dockerd are still shutting down.
+    for _ in {1..20}; do
+        pgrep -u "$BUILDER_USER" >/dev/null || break
+        sleep 0.5
+    done
+    pkill -KILL -u "$BUILDER_USER" >/dev/null 2>&1 && sleep 1
+    userdel -r "$BUILDER_USER" >/dev/null 2>&1 ||
+        echo "Could not remove the $BUILDER_USER user. Remove it with: userdel -r $BUILDER_USER"
     rm -rf "/etc/systemd/system/user-$builder_uid.slice.d"
     rm -rf /var/lib/sashimono
 fi
